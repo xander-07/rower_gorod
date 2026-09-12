@@ -1,0 +1,21 @@
+robot_geometry:
+  # Conservative outer envelope from the supplied UGV02 mechanical drawing.
+  length_m: 0.252
+  width_m: 0.230
+  height_m: 0.094
+
+  # Nav2 footprint around base_link. base_link is at the geometric center on
+  # the ground plane, +X forward, +Y left.
+  footprint:
+    - [0.126, 0.115]
+    - [0.126, -0.115]
+    - [-0.126, -0.115]
+    - [-0.126, 0.115]
+
+  lidar:
+    frame_id: laser
+    x_m: 0.040
+    y_m: 0.000
+    z_m: 0.1155
+    yaw_rad: 1.5707963267948966
+    note: "x is midpoint of measured +35..+45 mm forward offset; yaw assumes lidar arrow/zero points left"
