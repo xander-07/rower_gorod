@@ -16,12 +16,24 @@ def generate_launch_description():
     robot_description = xacro.process_file(xacro_file).toxml()
 
     enable_motion = LaunchConfiguration('enable_motion')
+    left_command_scale = LaunchConfiguration('left_command_scale')
+    right_command_scale = LaunchConfiguration('right_command_scale')
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'enable_motion',
             default_value='false',
             description='Allow /cmd_vel to command the drive motors. Default is false.',
+        ),
+        DeclareLaunchArgument(
+            'left_command_scale',
+            default_value='1.0',
+            description='Multiplicative calibration gain for the left drive side.',
+        ),
+        DeclareLaunchArgument(
+            'right_command_scale',
+            default_value='1.0',
+            description='Multiplicative calibration gain for the right drive side.',
         ),
         Node(
             package='robot_state_publisher',
@@ -50,6 +62,8 @@ def generate_launch_description():
                 'base_frame': 'base_link',
                 'odom_frame': 'odom',
                 'enable_motion': ParameterValue(enable_motion, value_type=bool),
+                'left_command_scale': ParameterValue(left_command_scale, value_type=float),
+                'right_command_scale': ParameterValue(right_command_scale, value_type=float),
             }],
         ),
     ])
