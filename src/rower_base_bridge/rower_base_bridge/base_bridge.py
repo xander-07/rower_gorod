@@ -22,9 +22,9 @@ class RowerBaseBridge(Node):
     """Bridge the Waveshare UGV02 JSON UART protocol to ROS 2.
 
     Drive commands use Waveshare T=1 left/right velocity control. Pose odometry
-    uses the cumulative ``odl`` / ``odr`` counters from T=1001 because the
-    instantaneous L/R feedback is too noisy for long-term pose integration on
-    the real skid-steer chassis.
+    uses cumulative ``odl`` / ``odr`` counters from T=1001. Pure in-place
+    angular commands and wheel-odometry yaw have separate skid-steer
+    calibrations derived from LiDAR turn tests on the real robot.
 
     Motion remains disabled unless ``enable_motion`` is explicitly true.
     """
@@ -35,7 +35,7 @@ class RowerBaseBridge(Node):
         self.declare_parameter('serial_port', '/dev/rower_base')
         self.declare_parameter('baud', 115200)
         self.declare_parameter('track_width', 0.172)
-        self.declare_parameter('odom_meters_per_count', 0.0104)
+        self.declare_parameter('odom_meters_per_count', 0.0102)
         self.declare_parameter('counter_step_limit', 20.0)
         self.declare_parameter('twist_window_sec', 0.60)
         self.declare_parameter('odom_frame', 'odom')
@@ -45,12 +45,33 @@ class RowerBaseBridge(Node):
         self.declare_parameter('command_rate_hz', 10.0)
         self.declare_parameter('cmd_timeout', 0.35)
         self.declare_parameter('max_wheel_speed', 0.25)
-        # Calibrated on the real robot on 2026-09-12. Before correction the
-        # left side accumulated 28 counts while the right accumulated 26 over
-        # the same straight command and the robot curved right. With these
-        # gains the next run produced 28 / 28 and was physically straight.
+
+        # Straight-line drivetrain calibration.
         self.declare_parameter('left_command_scale', 0.965)
         self.declare_parameter('right_command_scale', 1.035)
+
+        # In-place turn command calibration from LiDAR tests. Before
+        # compensation, measured physical angular speed followed approximately:
+        #   left : omega_real = 0.4804 * omega_raw - 0.1810
+        #   right: omega_real = 0.4523 * omega_raw - 0.1463
+        # Therefore desired physical omega is mapped back to the raw command by
+        # gain * |omega_desired| + offset. This correction is intentionally
+        # limited to near-zero linear velocity because moving arcs have not yet
+        # been separately calibrated.
+        self.declare_parameter('angular_compensation_enabled', True)
+        self.declare_parameter('angular_compensation_linear_threshold', 0.02)
+        self.declare_parameter('angular_command_deadband', 0.03)
+        self.declare_parameter('angular_command_gain_left', 2.0817)
+        self.declare_parameter('angular_command_offset_left', 0.3767)
+        self.declare_parameter('angular_command_gain_right', 2.2110)
+        self.declare_parameter('angular_command_offset_right', 0.3235)
+        self.declare_parameter('angular_command_max_raw', 2.50)
+
+        # Wheel counters substantially over-report chassis yaw during skid-steer
+        # turns. Direction-specific scales are based on the 1.6 and 2.0 rad/s
+        # LiDAR calibration runs. Linear distance remains unscaled by these.
+        self.declare_parameter('odom_yaw_scale_left', 0.60)
+        self.declare_parameter('odom_yaw_scale_right', 0.54)
 
         self.serial_port = str(self.get_parameter('serial_port').value)
         self.baud = int(self.get_parameter('baud').value)
@@ -67,6 +88,33 @@ class RowerBaseBridge(Node):
         self.max_wheel_speed = float(self.get_parameter('max_wheel_speed').value)
         self.left_command_scale = float(self.get_parameter('left_command_scale').value)
         self.right_command_scale = float(self.get_parameter('right_command_scale').value)
+
+        self.angular_compensation_enabled = bool(
+            self.get_parameter('angular_compensation_enabled').value
+        )
+        self.angular_compensation_linear_threshold = float(
+            self.get_parameter('angular_compensation_linear_threshold').value
+        )
+        self.angular_command_deadband = float(
+            self.get_parameter('angular_command_deadband').value
+        )
+        self.angular_command_gain_left = float(
+            self.get_parameter('angular_command_gain_left').value
+        )
+        self.angular_command_offset_left = float(
+            self.get_parameter('angular_command_offset_left').value
+        )
+        self.angular_command_gain_right = float(
+            self.get_parameter('angular_command_gain_right').value
+        )
+        self.angular_command_offset_right = float(
+            self.get_parameter('angular_command_offset_right').value
+        )
+        self.angular_command_max_raw = float(
+            self.get_parameter('angular_command_max_raw').value
+        )
+        self.odom_yaw_scale_left = float(self.get_parameter('odom_yaw_scale_left').value)
+        self.odom_yaw_scale_right = float(self.get_parameter('odom_yaw_scale_right').value)
 
         if self.track_width <= 0.0:
             raise ValueError('track_width must be > 0')
@@ -86,6 +134,20 @@ class RowerBaseBridge(Node):
             raise ValueError('left_command_scale must be in 0.5..1.5')
         if not (0.5 <= self.right_command_scale <= 1.5):
             raise ValueError('right_command_scale must be in 0.5..1.5')
+        if self.angular_compensation_linear_threshold < 0.0:
+            raise ValueError('angular_compensation_linear_threshold must be >= 0')
+        if self.angular_command_deadband < 0.0:
+            raise ValueError('angular_command_deadband must be >= 0')
+        if self.angular_command_gain_left <= 0.0 or self.angular_command_gain_right <= 0.0:
+            raise ValueError('angular command gains must be > 0')
+        if self.angular_command_offset_left < 0.0 or self.angular_command_offset_right < 0.0:
+            raise ValueError('angular command offsets must be >= 0')
+        if self.angular_command_max_raw <= 0.0:
+            raise ValueError('angular_command_max_raw must be > 0')
+        if not (0.0 < self.odom_yaw_scale_left <= 1.5):
+            raise ValueError('odom_yaw_scale_left must be in 0..1.5')
+        if not (0.0 < self.odom_yaw_scale_right <= 1.5):
+            raise ValueError('odom_yaw_scale_right must be in 0..1.5')
 
         self.odom_pub = self.create_publisher(Odometry, 'odom', 20)
         self.battery_pub = self.create_publisher(BatteryState, 'battery', 10)
@@ -114,8 +176,6 @@ class RowerBaseBridge(Node):
         self._send_json({'T': 4, 'cmd': 0})
 
         if self.enable_motion:
-            # Previous diagnostics deliberately end with T=0 emergency stop.
-            # Motion is only armed when the operator explicitly requests it.
             self._send_json({'T': 999})
             self.get_logger().warning(
                 'MOTION ENABLED: cmd_vel will be converted to T=1 wheel-speed commands.'
@@ -132,7 +192,9 @@ class RowerBaseBridge(Node):
             f'Opened {self.serial_port} at {self.baud} baud; '
             f'track_width={self.track_width:.3f} m; '
             f'odom_scale={self.odom_meters_per_count:.5f} m/count; '
-            f'drive_scales L={self.left_command_scale:.3f} R={self.right_command_scale:.3f}'
+            f'drive_scales L={self.left_command_scale:.3f} R={self.right_command_scale:.3f}; '
+            f'yaw_scales L={self.odom_yaw_scale_left:.3f} R={self.odom_yaw_scale_right:.3f}; '
+            f'angular_compensation={"on" if self.angular_compensation_enabled else "off"}'
         )
 
     def _send_json(self, payload: dict) -> None:
@@ -151,6 +213,36 @@ class RowerBaseBridge(Node):
             )
             self._motion_warning_sent = True
 
+    def _calibrated_angular_command(self, linear: float, angular: float) -> float:
+        """Map desired in-place chassis yaw rate to the raw skid-steer command."""
+        if not self.angular_compensation_enabled:
+            return angular
+        if abs(linear) > self.angular_compensation_linear_threshold:
+            return angular
+        if abs(angular) < self.angular_command_deadband:
+            return 0.0
+
+        magnitude = abs(angular)
+        if angular > 0.0:
+            raw = (
+                self.angular_command_gain_left * magnitude
+                + self.angular_command_offset_left
+            )
+        else:
+            raw = (
+                self.angular_command_gain_right * magnitude
+                + self.angular_command_offset_right
+            )
+        raw = min(raw, self.angular_command_max_raw)
+        return math.copysign(raw, angular)
+
+    def _yaw_scale(self, raw_dtheta: float) -> float:
+        if raw_dtheta > 0.0:
+            return self.odom_yaw_scale_left
+        if raw_dtheta < 0.0:
+            return self.odom_yaw_scale_right
+        return 1.0
+
     def _command_timer(self) -> None:
         if not self.enable_motion or self._closed:
             return
@@ -163,10 +255,14 @@ class RowerBaseBridge(Node):
             linear = self._cmd_linear
             angular = self._cmd_angular
 
-        # First compute ideal skid-steer side velocities, then compensate the
-        # measured left/right drivetrain asymmetry.
-        left = (linear - angular * self.track_width / 2.0) * self.left_command_scale
-        right = (linear + angular * self.track_width / 2.0) * self.right_command_scale
+        calibrated_angular = self._calibrated_angular_command(linear, angular)
+
+        left = (
+            linear - calibrated_angular * self.track_width / 2.0
+        ) * self.left_command_scale
+        right = (
+            linear + calibrated_angular * self.track_width / 2.0
+        ) * self.right_command_scale
         left = max(-self.max_wheel_speed, min(self.max_wheel_speed, left))
         right = max(-self.max_wheel_speed, min(self.max_wheel_speed, right))
         self._send_json({'T': 1, 'L': round(left, 4), 'R': round(right, 4)})
@@ -188,7 +284,6 @@ class RowerBaseBridge(Node):
             try:
                 msg = json.loads(text)
             except json.JSONDecodeError:
-                # Opening a streaming UART can begin in the middle of a line.
                 self.get_logger().debug(f'Ignoring malformed/partial UART line: {text[:120]}')
                 continue
             if msg.get('T') == 1001:
@@ -203,12 +298,7 @@ class RowerBaseBridge(Node):
         return result if math.isfinite(result) else None
 
     def _counter_twist(self, now_mono: float, odl: float, odr: float) -> tuple[float, float]:
-        """Estimate velocity from a rolling window of cumulative counters.
-
-        The counters are intentionally low-resolution (roughly centimetre-sized
-        increments), so differentiating one sample at a time creates spikes.
-        A rolling window provides a much calmer velocity estimate for Nav2.
-        """
+        """Estimate velocity from a rolling window of cumulative counters."""
         self._counter_history.append((now_mono, odl, odr))
         cutoff = now_mono - self.twist_window_sec
         while len(self._counter_history) > 2 and self._counter_history[1][0] <= cutoff:
@@ -225,7 +315,8 @@ class RowerBaseBridge(Node):
         dl = (odl - odl0) * self.odom_meters_per_count
         dr = (odr - odr0) * self.odom_meters_per_count
         linear = (dl + dr) / (2.0 * dt)
-        angular = (dr - dl) / (self.track_width * dt)
+        raw_angular = (dr - dl) / (self.track_width * dt)
+        angular = raw_angular * self._yaw_scale(raw_angular)
         return linear, angular
 
     def _handle_base_feedback(self, msg: dict) -> None:
@@ -237,8 +328,6 @@ class RowerBaseBridge(Node):
         odl = self._finite_float(msg.get('odl'))
         odr = self._finite_float(msg.get('odr'))
 
-        # Preserve useful raw T=1001 fields for diagnostics/calibration without
-        # allowing a second process to fight the bridge for ownership of UART.
         raw_feedback = {
             'L': left,
             'R': right,
@@ -259,14 +348,12 @@ class RowerBaseBridge(Node):
                 dcl = odl - self._last_counter_left
                 dcr = odr - self._last_counter_right
 
-                # A very large one-sample change means the controller probably
-                # reset/restarted or the stream was corrupted. Re-base instead
-                # of teleporting the ROS odometry pose.
                 if abs(dcl) <= self.counter_step_limit and abs(dcr) <= self.counter_step_limit:
                     dl = dcl * self.odom_meters_per_count
                     dr = dcr * self.odom_meters_per_count
                     ds = (dl + dr) / 2.0
-                    dtheta = (dr - dl) / self.track_width
+                    raw_dtheta = (dr - dl) / self.track_width
+                    dtheta = raw_dtheta * self._yaw_scale(raw_dtheta)
                     yaw_mid = self._yaw + dtheta * 0.5
                     self._x += ds * math.cos(yaw_mid)
                     self._y += ds * math.sin(yaw_mid)
@@ -285,10 +372,9 @@ class RowerBaseBridge(Node):
             self._last_counter_right = odr
             linear, angular = self._counter_twist(now_mono, odl, odr)
         else:
-            # This fallback should not normally be used on the validated UGV02
-            # firmware, but keeps telemetry available if counters are absent.
             linear = (left + right) / 2.0
-            angular = (right - left) / self.track_width
+            raw_angular = (right - left) / self.track_width
+            angular = raw_angular * self._yaw_scale(raw_angular)
 
         stamp = self.get_clock().now().to_msg()
         qz = math.sin(self._yaw / 2.0)
@@ -305,13 +391,14 @@ class RowerBaseBridge(Node):
         odom.twist.twist.linear.x = linear
         odom.twist.twist.angular.z = angular
 
-        # Conservative planar covariance; refine after turn calibration / SLAM.
+        # Wheel yaw is skid-sensitive, so retain a deliberately conservative
+        # yaw covariance even after empirical scaling.
         odom.pose.covariance[0] = 0.03
         odom.pose.covariance[7] = 0.03
-        odom.pose.covariance[35] = 0.15
+        odom.pose.covariance[35] = 0.20
         odom.twist.covariance[0] = 0.04
         odom.twist.covariance[7] = 0.04
-        odom.twist.covariance[35] = 0.15
+        odom.twist.covariance[35] = 0.20
         self.odom_pub.publish(odom)
 
         if self.tf_broadcaster is not None:
