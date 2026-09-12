@@ -43,6 +43,22 @@ aarch64
 arm64
 ```
 
+## Important Raspberry Pi 5 UART note
+
+Do **not** assume that `/dev/serial0` on the fresh Ubuntu image points to the same GPIO UART as it did on the Waveshare Debian image.
+
+Raspberry Pi 5 has a dedicated debug UART (`UART10`), and UART routing/device aliases can differ from the current Debian setup. The ESP32 is physically connected to GPIO14/GPIO15 (40-pin header), so the fresh Ubuntu installation must be inspected before the base probe is run.
+
+Immediately after first Ubuntu boot collect:
+
+```bash
+ls -l /dev/serial* /dev/ttyAMA* 2>/dev/null || true
+cat /boot/firmware/config.txt | grep -E 'uart|serial' || true
+cat /proc/cmdline
+```
+
+Do not add a Linux serial console to the ESP32 UART: kernel/console output on those GPIO pins would conflict with the Waveshare JSON protocol. Once the fresh-image output is known, configure the Pi 5 GPIO UART explicitly if necessary and then choose a stable project device name for the base.
+
 ## Clone the project
 
 ```bash
@@ -90,18 +106,23 @@ echo "ROS_DISTRO=$ROS_DISTRO"
 ros2 --help >/dev/null && echo ROS2_OK
 ros2 pkg list | grep -E '^(nav2_bringup|slam_toolbox)$'
 
-ls -l /dev/serial0 /dev/rower_lidar
+ls -l /dev/serial* /dev/ttyAMA* /dev/rower_lidar 2>/dev/null || true
 id
 ```
 
-Then re-run the safe hardware probes from this repository:
+Then re-run the safe lidar probe:
 
 ```bash
 python3 scripts/stl19p_probe.py --port /dev/rower_lidar --frames 20
-python3 scripts/ugv_base_probe.py --port /dev/serial0 --seconds 3
 ```
 
-These two tests must pass before creating/starting the ROS driver nodes.
+Run the base probe only after the GPIO14/GPIO15 UART device has been identified on the new image:
+
+```bash
+python3 scripts/ugv_base_probe.py --port <GPIO_UART_DEVICE> --seconds 3
+```
+
+Both hardware probes must pass before creating/starting the ROS driver nodes.
 
 ## Planned ROS graph
 
