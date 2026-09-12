@@ -161,7 +161,7 @@
       </div>
 
       <div class="section">
-        <h2>Ручное управление</h2>
+        <h2>Ручное управление картографированием</h2>
         <button id="armBtn" class="arm">УПРАВЛЕНИЕ ЗАБЛОКИРОВАНО</button>
         <div class="small">Кнопка выше — дополнительный предохранитель браузера. Движение всё равно возможно только если ROS запущен с <span class="keys">enable_motion:=true</span>.</div>
 
@@ -177,10 +177,11 @@
         <label>Линейная скорость: <strong id="linearValue">0.06</strong> м/с</label>
         <input id="linearSpeed" type="range" min="0.03" max="0.08" step="0.01" value="0.06" />
 
-        <label>Угловая скорость: <strong id="angularValue">0.40</strong> рад/с</label>
-        <input id="angularSpeed" type="range" min="0.20" max="0.80" step="0.05" value="0.40" />
+        <label>Угловая скорость: <strong id="angularValue">0.25</strong> рад/с</label>
+        <input id="angularSpeed" type="range" min="0.15" max="0.40" step="0.05" value="0.25" />
 
-        <p class="small">Клавиши: <span class="keys">W/↑</span> вперёд, <span class="keys">S/↓</span> назад, <span class="keys">A/←</span> поворот на месте влево, <span class="keys">D/→</span> вправо, <span class="keys">Space</span> стоп. Дуги намеренно отключены.</p>
+        <p class="small">Для чистой карты: прямая → остановка 0.5–1 с → медленный поворот на месте → остановка 0.5–1 с → прямая. Дуги намеренно отключены.</p>
+        <p class="small">Клавиши: <span class="keys">W/↑</span> вперёд, <span class="keys">S/↓</span> назад, <span class="keys">A/←</span> поворот влево, <span class="keys">D/→</span> вправо, <span class="keys">Space</span> стоп.</p>
       </div>
     </aside>
   </main>
@@ -276,9 +277,11 @@
       ws.onopen = () => {
         setBadge(wsBadge, 'ROS: подключено', 'ok');
         send({ op: 'advertise', topic: '/cmd_vel', type: 'geometry_msgs/msg/Twist' });
-        subscribe('/map', 500);
-        subscribe('/odom', 50);
-        subscribe('/scan', 100);
+        // Keep the browser useful without making rosbridge mirror every high-rate
+        // sample. SLAM itself still receives ROS topics directly.
+        subscribe('/map', 1000);
+        subscribe('/odom', 100);
+        subscribe('/scan', 200);
         subscribe('/tf', 100);
         subscribe('/tf_static', 0);
         subscribe('/battery', 500);
@@ -443,7 +446,6 @@
         }
 
         const p = toCanvas(robot.x, robot.y);
-        const arrowLen = 0.18 * scale;
         const q = toCanvas(robot.x + Math.cos(robot.yaw) * 0.18, robot.y + Math.sin(robot.yaw) * 0.18);
         ctx.strokeStyle = '#ff5e62';
         ctx.lineWidth = 3;
