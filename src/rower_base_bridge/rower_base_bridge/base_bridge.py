@@ -226,6 +226,7 @@ class RowerBaseBridge(Node):
         battery = BatteryState()
         battery.header.stamp = stamp
         battery.voltage = voltage
+        battery.temperature = math.nan
         battery.current = math.nan
         battery.charge = math.nan
         battery.capacity = math.nan
@@ -261,7 +262,10 @@ def main(args=None) -> None:
     finally:
         node.stop_controller()
         node.destroy_node()
-        rclpy.shutdown()
+        # ROS 2's signal handler may already have shut down the default context
+        # after Ctrl+C. Avoid calling shutdown twice, which raises RCLError.
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
