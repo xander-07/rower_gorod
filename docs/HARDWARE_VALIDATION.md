@@ -204,6 +204,45 @@ present: true
 
 The bridge also publishes the `odom -> base_link` transform on `/tf`. `/cmd_vel` exists as a subscription but is ignored for motor output while `enable_motion=false`.
 
+## Mechanical geometry / lidar transform
+
+The supplied UGV02 mechanical drawing gives a conservative overall envelope of approximately:
+
+```text
+length: 252 mm
+width:  230 mm
+height:  94 mm
+```
+
+For ROS/Nav2 we use `base_link` at the geometric center of the robot footprint on the ground plane, with the standard convention `+X forward`, `+Y left`, `+Z up`.
+
+The real STL-19P installation was measured as:
+
+```text
+x: +35..+45 mm ahead of robot center -> nominal +40 mm
+y: 0 mm (centered laterally unless later measurement says otherwise)
+z: 115.5 mm scan-plane height
+```
+
+The lidar's marked arrow/zero direction points to the robot's left relative to the robot front. Therefore the nominal fixed transform uses:
+
+```text
+base_link -> laser
+xyz = [0.040, 0.000, 0.1155] m
+yaw = +90 deg = +1.57079632679 rad
+```
+
+The conservative Nav2 footprint based on the outer wheel envelope is:
+
+```text
+[[ 0.126,  0.115],
+ [ 0.126, -0.115],
+ [-0.126, -0.115],
+ [-0.126,  0.115]]
+```
+
+These values are implemented in `rower_description`. The +40 mm X offset is the midpoint of the measured +35..+45 mm range and can be refined later. The +90 degree yaw should be visually verified in RViz/SLAM by checking that a physical obstacle on the robot's left appears at the corresponding side of the scan.
+
 ## Current conclusion
 
 ```text
@@ -222,6 +261,7 @@ wheel encoders / odometry feedback                     OK
 battery voltage feedback                               OK
 base-only module selection via T=4,cmd=0               OK (RAM only)
 built-in IMU data stream                               NOT USABLE (all zeros)
+robot envelope / lidar mounting geometry               RECORDED
 ```
 
-Next: add the fixed `base_link -> laser` transform and robot description, then validate the full TF tree before starting SLAM Toolbox. Motion remains disabled until the navigation frame geometry is verified.
+Next: build `rower_description` and `rower_bringup`, validate `base_link -> laser` in the TF tree, then start SLAM Toolbox. Motion remains disabled until the navigation frame geometry is verified.
