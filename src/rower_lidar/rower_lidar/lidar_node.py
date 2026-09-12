@@ -184,7 +184,10 @@ def main(args=None) -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # ROS 2's signal handler may already have shut down the default context
+        # after Ctrl+C. Avoid calling shutdown twice, which raises RCLError.
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
