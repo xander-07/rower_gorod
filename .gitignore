@@ -1,0 +1,30 @@
+# ROS 2 / colcon
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime data
+*.bag
+*.db3
+*.mcap
+rosbags/
+logs/
+
+# Models / generated caches
+*.engine
+*.onnx.cache
