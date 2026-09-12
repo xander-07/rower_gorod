@@ -26,6 +26,10 @@ class RowerBaseBridge(Node):
     angular commands and wheel-odometry yaw have separate skid-steer
     calibrations derived from LiDAR turn tests on the real robot.
 
+    Normal requested speed changes are rate-limited in wheel space so starts,
+    stops and direction changes are smoother. The command watchdog and shutdown
+    path deliberately bypass the ramp and stop the base immediately.
+
     Motion remains disabled unless ``enable_motion`` is explicitly true.
     """
 
@@ -42,9 +46,15 @@ class RowerBaseBridge(Node):
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('publish_tf', True)
         self.declare_parameter('enable_motion', False)
-        self.declare_parameter('command_rate_hz', 10.0)
+        self.declare_parameter('command_rate_hz', 20.0)
         self.declare_parameter('cmd_timeout', 0.35)
         self.declare_parameter('max_wheel_speed', 0.25)
+
+        # Wheel-space slew limiting. At the default limits a 0.06 m/s straight
+        # command reaches target in about 0.5 s and normally stops in about
+        # 0.33 s. A stale /cmd_vel still causes an immediate zero command.
+        self.declare_parameter('wheel_accel_limit', 0.12)
+        self.declare_parameter('wheel_decel_limit', 0.18)
 
         # Straight-line drivetrain calibration.
         self.declare_parameter('left_command_scale', 0.965)
@@ -68,10 +78,9 @@ class RowerBaseBridge(Node):
         self.declare_parameter('angular_command_max_raw', 2.50)
 
         # Wheel counters substantially over-report chassis yaw during skid-steer
-        # turns. Direction-specific scales are based on the 1.6 and 2.0 rad/s
-        # LiDAR calibration runs. Linear distance remains unscaled by these.
-        self.declare_parameter('odom_yaw_scale_left', 0.60)
-        self.declare_parameter('odom_yaw_scale_right', 0.54)
+        # turns. Final LiDAR validation supports a symmetric 0.50 scale.
+        self.declare_parameter('odom_yaw_scale_left', 0.50)
+        self.declare_parameter('odom_yaw_scale_right', 0.50)
 
         self.serial_port = str(self.get_parameter('serial_port').value)
         self.baud = int(self.get_parameter('baud').value)
@@ -86,6 +95,8 @@ class RowerBaseBridge(Node):
         self.command_rate_hz = float(self.get_parameter('command_rate_hz').value)
         self.cmd_timeout = float(self.get_parameter('cmd_timeout').value)
         self.max_wheel_speed = float(self.get_parameter('max_wheel_speed').value)
+        self.wheel_accel_limit = float(self.get_parameter('wheel_accel_limit').value)
+        self.wheel_decel_limit = float(self.get_parameter('wheel_decel_limit').value)
         self.left_command_scale = float(self.get_parameter('left_command_scale').value)
         self.right_command_scale = float(self.get_parameter('right_command_scale').value)
 
@@ -130,6 +141,10 @@ class RowerBaseBridge(Node):
             raise ValueError('cmd_timeout must be > 0')
         if self.max_wheel_speed <= 0.0:
             raise ValueError('max_wheel_speed must be > 0')
+        if self.wheel_accel_limit <= 0.0:
+            raise ValueError('wheel_accel_limit must be > 0')
+        if self.wheel_decel_limit <= 0.0:
+            raise ValueError('wheel_decel_limit must be > 0')
         if not (0.5 <= self.left_command_scale <= 1.5):
             raise ValueError('left_command_scale must be in 0.5..1.5')
         if not (0.5 <= self.right_command_scale <= 1.5):
@@ -168,6 +183,9 @@ class RowerBaseBridge(Node):
         self._last_cmd_time: Optional[float] = None
         self._cmd_linear = 0.0
         self._cmd_angular = 0.0
+        self._sent_left = 0.0
+        self._sent_right = 0.0
+        self._last_command_tick = time.monotonic()
         self._motion_warning_sent = False
         self._closed = False
 
@@ -194,6 +212,7 @@ class RowerBaseBridge(Node):
             f'odom_scale={self.odom_meters_per_count:.5f} m/count; '
             f'drive_scales L={self.left_command_scale:.3f} R={self.right_command_scale:.3f}; '
             f'yaw_scales L={self.odom_yaw_scale_left:.3f} R={self.odom_yaw_scale_right:.3f}; '
+            f'wheel_slew accel={self.wheel_accel_limit:.3f} decel={self.wheel_decel_limit:.3f} m/s^2; '
             f'angular_compensation={"on" if self.angular_compensation_enabled else "off"}'
         )
 
@@ -243,29 +262,77 @@ class RowerBaseBridge(Node):
             return self.odom_yaw_scale_right
         return 1.0
 
+    @staticmethod
+    def _slew_wheel(current: float, target: float, dt: float, accel: float, decel: float) -> float:
+        """Rate-limit one wheel command without jumping through zero on reversal."""
+        if dt <= 0.0 or current == target:
+            return target
+
+        # Reversal first decelerates to zero. The opposite direction begins on a
+        # later timer tick, which avoids a single-command sign flip.
+        if current * target < 0.0:
+            step = decel * dt
+            if abs(current) <= step:
+                return 0.0
+            return current - math.copysign(step, current)
+
+        speeding_up = abs(target) > abs(current)
+        limit = accel if speeding_up else decel
+        step = limit * dt
+        delta = target - current
+        if abs(delta) <= step:
+            return target
+        return current + math.copysign(step, delta)
+
     def _command_timer(self) -> None:
         if not self.enable_motion or self._closed:
             return
 
         now = time.monotonic()
-        if self._last_cmd_time is None or (now - self._last_cmd_time) > self.cmd_timeout:
-            linear = 0.0
-            angular = 0.0
-        else:
-            linear = self._cmd_linear
-            angular = self._cmd_angular
+        dt = max(0.0, min(0.25, now - self._last_command_tick))
+        self._last_command_tick = now
 
+        stale = self._last_cmd_time is None or (now - self._last_cmd_time) > self.cmd_timeout
+        if stale:
+            # Safety path: stale command means immediate motor stop. Do not ramp.
+            self._sent_left = 0.0
+            self._sent_right = 0.0
+            self._send_json({'T': 1, 'L': 0.0, 'R': 0.0})
+            return
+
+        linear = self._cmd_linear
+        angular = self._cmd_angular
         calibrated_angular = self._calibrated_angular_command(linear, angular)
 
-        left = (
+        target_left = (
             linear - calibrated_angular * self.track_width / 2.0
         ) * self.left_command_scale
-        right = (
+        target_right = (
             linear + calibrated_angular * self.track_width / 2.0
         ) * self.right_command_scale
-        left = max(-self.max_wheel_speed, min(self.max_wheel_speed, left))
-        right = max(-self.max_wheel_speed, min(self.max_wheel_speed, right))
-        self._send_json({'T': 1, 'L': round(left, 4), 'R': round(right, 4)})
+        target_left = max(-self.max_wheel_speed, min(self.max_wheel_speed, target_left))
+        target_right = max(-self.max_wheel_speed, min(self.max_wheel_speed, target_right))
+
+        self._sent_left = self._slew_wheel(
+            self._sent_left,
+            target_left,
+            dt,
+            self.wheel_accel_limit,
+            self.wheel_decel_limit,
+        )
+        self._sent_right = self._slew_wheel(
+            self._sent_right,
+            target_right,
+            dt,
+            self.wheel_accel_limit,
+            self.wheel_decel_limit,
+        )
+
+        self._send_json({
+            'T': 1,
+            'L': round(self._sent_left, 4),
+            'R': round(self._sent_right, 4),
+        })
 
     def _read_serial(self) -> None:
         if self._closed:
@@ -438,6 +505,8 @@ class RowerBaseBridge(Node):
             return
         if self.enable_motion:
             try:
+                self._sent_left = 0.0
+                self._sent_right = 0.0
                 self._send_json({'T': 1, 'L': 0.0, 'R': 0.0})
                 self._send_json({'T': 0})
             except serial.SerialException:
