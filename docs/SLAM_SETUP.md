@@ -44,7 +44,7 @@ wheel deceleration: 0.18 m/s^2
 
 At a straight command of `0.06 m/s`, target speed is reached in roughly 0.5 s instead of being applied as one step. Normal zero-velocity commands are also ramped down.
 
-Safety behavior is intentionally different: if `/cmd_vel` becomes stale for more than `0.35 s`, or the ROS node shuts down, the bridge bypasses the ramp and commands an immediate zero. Smooth motion must never weaken the watchdog stop.
+Safety behavior is intentionally different: if `/cmd_vel` becomes stale for more than `0.35 s`, an emergency-stop message arrives on `/base/emergency_stop`, or the ROS node shuts down, the bridge bypasses the ramp and commands an immediate zero. Smooth motion must never weaken the emergency stop.
 
 The final wheel-counter yaw defaults are also aligned with the validated bringup values:
 
@@ -140,7 +140,7 @@ angular: 0.25 rad/s
 
 The angular control range is deliberately limited to `0.15..0.40 rad/s` for mapping. Fast skid-steer turns distort a rotating LiDAR scan and increase the chance of scan-matching errors.
 
-When a normal key/button is released, the page keeps publishing zero velocity briefly so the base bridge has enough time to perform its smooth deceleration. If browser communication disappears completely, the bridge watchdog still performs the immediate stop.
+When a normal movement key/button is released, the page keeps publishing zero velocity briefly so the base bridge has enough time to perform its smooth deceleration. The red `АВАРИЙНЫЙ СТОП` button and the `Space` key publish `/base/emergency_stop`, which bypasses the ramp and immediately forces both wheel commands to zero. Losing browser communication still falls back to the `0.35 s` bridge watchdog.
 
 ## Mapping with motion enabled
 
