@@ -1,0 +1,65 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="rower_ugv02">
+  <!--
+    Geometry derived from the supplied Waveshare UGV02 drawing and the real
+    lidar installation measured on the robot.
+
+    ROS convention used here:
+      +X = robot forward
+      +Y = robot left
+      +Z = up
+
+    Conservative outer robot envelope from the drawing:
+      length = 252 mm
+      width  = 230 mm
+      height = 94 mm
+
+    STL-19P scan plane:
+      x = +40 mm (midpoint of measured +35..+45 mm forward offset)
+      y = 0 mm (assumed centered laterally)
+      z = 115.5 mm
+      yaw = +90 deg because the lidar's marked zero/arrow points to the
+            robot's left while robot +X points forward.
+  -->
+
+  <xacro:arg name="lidar_x" default="0.040"/>
+  <xacro:arg name="lidar_y" default="0.000"/>
+  <xacro:arg name="lidar_z" default="0.1155"/>
+  <xacro:arg name="lidar_yaw" default="1.5707963267948966"/>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.047" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.252 0.230 0.094"/>
+      </geometry>
+      <material name="rower_body">
+        <color rgba="0.12 0.12 0.12 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.047" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.252 0.230 0.094"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="laser">
+    <visual>
+      <origin xyz="0 0 0.010" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.025" length="0.020"/>
+      </geometry>
+      <material name="lidar_body">
+        <color rgba="0.20 0.20 0.20 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="base_link_to_laser" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser"/>
+    <origin xyz="$(arg lidar_x) $(arg lidar_y) $(arg lidar_z)" rpy="0 0 $(arg lidar_yaw)"/>
+  </joint>
+</robot>
