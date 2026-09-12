@@ -92,7 +92,7 @@ def main() -> int:
     )
     parser.add_argument('--run', action='store_true', help='Required to allow floor motion.')
     parser.add_argument('--speed', type=float, default=0.06, help='Forward command in m/s (0.03..0.10).')
-    parser.add_argument('--seconds', type=float, default=1.5, help='Command duration in seconds (0.5..4.0).')
+    parser.add_argument('--seconds', type=float, default=1.5, help='Command duration in seconds (0.5..6.0).')
     parser.add_argument('--rate', type=float, default=10.0, help='cmd_vel publish rate in Hz (5..20).')
     args = parser.parse_args()
 
@@ -102,8 +102,8 @@ def main() -> int:
     if not (0.03 <= args.speed <= 0.10):
         print('ERROR: --speed must be between 0.03 and 0.10 m/s for floor calibration.')
         return 2
-    if not (0.5 <= args.seconds <= 4.0):
-        print('ERROR: --seconds must be between 0.5 and 4.0 s.')
+    if not (0.5 <= args.seconds <= 6.0):
+        print('ERROR: --seconds must be between 0.5 and 6.0 s.')
         return 2
     if not (5.0 <= args.rate <= 20.0):
         print('ERROR: --rate must be between 5 and 20 Hz.')
@@ -169,11 +169,19 @@ def main() -> int:
         if node.first_raw is not None and node.last_raw is not None:
             odl0, odr0 = node.first_raw
             odl1, odr1 = node.last_raw
+            dl = odl1 - odl0
+            dr = odr1 - odr0
+            avg_counts = (abs(dl) + abs(dr)) / 2.0
+            # Current Waveshare firmware transmits int(en_odom_* * 100), so one
+            # integer count is nominally 0.01 m before physical scale calibration.
+            nominal_counter_distance = avg_counts * 0.01
             print(
                 'RAW_COUNTERS: '
                 f'samples={node.raw_samples} '
-                f'odl={odl0:.0f}->{odl1:.0f} delta={odl1 - odl0:.0f} '
-                f'odr={odr0:.0f}->{odr1:.0f} delta={odr1 - odr0:.0f}'
+                f'odl={odl0:.0f}->{odl1:.0f} delta={dl:.0f} '
+                f'odr={odr0:.0f}->{odr1:.0f} delta={dr:.0f} '
+                f'avg_delta={avg_counts:.1f} '
+                f'nominal_counter_distance={nominal_counter_distance:.3f}m'
             )
         else:
             print('RAW_COUNTERS: unavailable (update/rebuild rower_base_bridge if needed)')
