@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 import time
@@ -10,6 +11,7 @@ import rclpy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from std_msgs.msg import String
 
 
 class FloorStraightProbe(Node):
@@ -18,11 +20,15 @@ class FloorStraightProbe(Node):
         self.rate_hz = rate_hz
         self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.sub = self.create_subscription(Odometry, '/odom', self._odom_cb, 20)
+        self.raw_sub = self.create_subscription(String, '/base/raw_feedback', self._raw_cb, 20)
         self.first = None
         self.last = None
         self.samples = 0
         self.linear_samples = []
         self.angular_samples = []
+        self.last_raw = None
+        self.first_raw = None
+        self.raw_samples = 0
 
     @staticmethod
     def _yaw_from_quaternion(q) -> float:
@@ -43,6 +49,18 @@ class FloorStraightProbe(Node):
         self.linear_samples.append(float(msg.twist.twist.linear.x))
         self.angular_samples.append(float(msg.twist.twist.angular.z))
         self.samples += 1
+
+    def _raw_cb(self, msg: String) -> None:
+        try:
+            payload = json.loads(msg.data)
+            odl = float(payload['odl'])
+            odr = float(payload['odr'])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return
+        self.last_raw = (odl, odr)
+        if self.first_raw is None:
+            self.first_raw = self.last_raw
+        self.raw_samples += 1
 
     def publish(self, linear_x: float) -> None:
         msg = Twist()
@@ -74,7 +92,7 @@ def main() -> int:
     )
     parser.add_argument('--run', action='store_true', help='Required to allow floor motion.')
     parser.add_argument('--speed', type=float, default=0.06, help='Forward command in m/s (0.03..0.10).')
-    parser.add_argument('--seconds', type=float, default=1.5, help='Command duration in seconds (0.5..2.0).')
+    parser.add_argument('--seconds', type=float, default=1.5, help='Command duration in seconds (0.5..4.0).')
     parser.add_argument('--rate', type=float, default=10.0, help='cmd_vel publish rate in Hz (5..20).')
     args = parser.parse_args()
 
@@ -84,8 +102,8 @@ def main() -> int:
     if not (0.03 <= args.speed <= 0.10):
         print('ERROR: --speed must be between 0.03 and 0.10 m/s for floor calibration.')
         return 2
-    if not (0.5 <= args.seconds <= 2.0):
-        print('ERROR: --seconds must be between 0.5 and 2.0 s.')
+    if not (0.5 <= args.seconds <= 4.0):
+        print('ERROR: --seconds must be between 0.5 and 4.0 s.')
         return 2
     if not (5.0 <= args.rate <= 20.0):
         print('ERROR: --rate must be between 5 and 20 Hz.')
@@ -111,13 +129,15 @@ def main() -> int:
 
         # Re-zero measurement origin at the start of commanded travel.
         node.first = node.last
+        node.first_raw = node.last_raw
         node.linear_samples.clear()
         node.angular_samples.clear()
         node.samples = 0
+        node.raw_samples = 0
 
         spin_for(node, args.seconds, command=args.speed)
 
-        # Explicit stop and collect settling odometry.
+        # Explicit stop and collect settling odometry/counters.
         for _ in range(8):
             node.publish(0.0)
             rclpy.spin_once(node, timeout_sec=0.05)
@@ -145,6 +165,19 @@ def main() -> int:
             f'max|linear.x|={max_linear:.4f}m/s '
             f'max|angular.z|={max_angular:.4f}rad/s'
         )
+
+        if node.first_raw is not None and node.last_raw is not None:
+            odl0, odr0 = node.first_raw
+            odl1, odr1 = node.last_raw
+            print(
+                'RAW_COUNTERS: '
+                f'samples={node.raw_samples} '
+                f'odl={odl0:.0f}->{odl1:.0f} delta={odl1 - odl0:.0f} '
+                f'odr={odr0:.0f}->{odr1:.0f} delta={odr1 - odr0:.0f}'
+            )
+        else:
+            print('RAW_COUNTERS: unavailable (update/rebuild rower_base_bridge if needed)')
+
         print('MEASURE: physically measure the robot travel from its start center to finish center.')
         print('Return the measured distance in mm and whether it visibly pulled left or right.')
         return 0
