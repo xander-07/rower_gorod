@@ -52,6 +52,18 @@ if [[ -n "$DIALOUT_GID" ]]; then
   ARGS+=(--group-add "$DIALOUT_GID")
 fi
 
-ARGS+=("$IMAGE" bash)
+if (( $# > 0 )); then
+  # One-shot command mode. ROS and the local workspace are sourced automatically,
+  # so callers can run ROS commands directly from the Debian host.
+  ARGS+=(
+    "$IMAGE"
+    bash -lc
+    'source /opt/ros/jazzy/setup.bash; if [[ -f /workspace/rower_gorod/install/setup.bash ]]; then source /workspace/rower_gorod/install/setup.bash; fi; exec "$@"'
+    bash
+    "$@"
+  )
+else
+  ARGS+=("$IMAGE" bash)
+fi
 
 exec docker "${ARGS[@]}"
