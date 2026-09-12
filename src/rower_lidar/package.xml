@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>rower_lidar</name>
+  <version>0.1.0</version>
+  <description>ROS 2 driver for LDROBOT STL-19P / LD19-family lidar.</description>
+  <maintainer email="80409749+xander-07@users.noreply.github.com">Alex</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>python3-serial</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
