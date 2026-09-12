@@ -4,7 +4,7 @@ project(rower_navigation)
 find_package(ament_cmake REQUIRED)
 
 install(
-  DIRECTORY launch config
+  DIRECTORY launch config web
   DESTINATION share/${PROJECT_NAME}
 )
 
