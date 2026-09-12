@@ -20,13 +20,6 @@ Bringup was started explicitly with motion enabled:
 ros2 launch rower_bringup robot.launch.py enable_motion:=true
 ```
 
-The bridge reported:
-
-```text
-MOTION ENABLED: cmd_vel will be converted to T=1 wheel-speed commands.
-Opened /dev/rower_base at 115200 baud; track_width=0.172 m
-```
-
 The guarded ROS motion probe commanded `linear.x=0.10 m/s`, `angular.z=0` for 1.0 s. Result:
 
 ```text
@@ -109,21 +102,67 @@ but this must **not** be hard-coded yet because the physical measurement was onl
 
 The false ROS yaw is still present (`+6.32 deg`) even though the robot was visually straight. This confirms that instantaneous `L/R` speed samples should not be used directly for long-term heading integration.
 
-## Next calibration: longer precisely measured straight run
+## Third straight floor run — 5 second run and drive asymmetry
 
-Use a longer run so the 1-count quantization of `odl/odr` becomes a smaller percentage of the total distance. Mark the robot center before and after the run and measure with a ruler/tape, preferably to within a few millimetres.
+The longer run used:
 
-Recommended command:
-
-```bash
-python3 scripts/ros_floor_straight_probe.py \
-  --run \
-  --speed 0.06 \
-  --seconds 5.0
+```text
+linear.x = 0.06 m/s
+angular.z = 0
+duration = 5.0 s
+nominal commanded travel = 0.30 m
 ```
 
-Nominal commanded travel is 0.30 m. Use only with at least 1 m clear space ahead. The script now permits up to 6 seconds and reports `nominal_counter_distance` from the raw counters for convenience.
+Observed result:
 
-After one accurately measured longer run, calculate the physical metres-per-counter scale. Then update `rower_base_bridge` to integrate pose from cumulative `odl/odr` deltas. Keep instantaneous `L/R` only as velocity telemetry (and potentially filter it) rather than as the primary pose source.
+```text
+SUMMARY: odom_samples=32 dx=0.3041m dy=0.0127m odom_distance=0.3044m dyaw=-12.77deg max|linear.x|=0.3802m/s max|angular.z|=2.2206rad/s
+RAW_COUNTERS: samples=31 odl=38->66 delta=28 odr=36->62 delta=26 avg_delta=27.0 nominal_counter_distance=0.270m
+```
 
-Only after straight-line scale is fixed should effective skid-steer track width / turning odometry be calibrated.
+Physical measurement/observation:
+
+```text
+forward travel: approximately 290 mm
+lateral drift: approximately 60 mm to the right
+```
+
+This run exposes a repeatable drivetrain asymmetry that was less obvious in the shorter tests. The left cumulative counter increased by 28 counts while the right increased by 26 counts. A left side that travels farther than the right side produces a right-hand arc, which agrees with the observed physical drift.
+
+The measured distance gives a provisional cumulative-counter scale:
+
+```text
+0.290 m / 27.0 counts ~= 0.01074 m/count
+```
+
+This is close to the firmware's nominal 0.01 m/count but indicates the real wheel/encoder scale is about 7% larger. Keep this value provisional until one more corrected straight run confirms it.
+
+For straight-line command balancing, the observed raw-count ratio is:
+
+```text
+left/right = 28/26 ~= 1.077
+```
+
+A symmetric first correction that preserves approximately the same average command magnitude is therefore:
+
+```text
+left_command_scale  = 0.965
+right_command_scale = 1.035
+```
+
+The bridge now supports these gains as ROS parameters. They are intentionally not made the defaults yet; the next floor run should explicitly launch with them and verify whether the rightward drift is substantially reduced.
+
+The current `/odom` heading remains unreliable because it is still integrated from instantaneous `L/R`. The `-12.77 deg` reported yaw should not be used to judge the physical turn. Cumulative counters are the preferred candidate for the next odometry implementation.
+
+## Next calibration: verify side-drive correction
+
+Launch the robot with:
+
+```text
+left_command_scale=0.965
+right_command_scale=1.035
+```
+
+and repeat the same 5 second, 0.06 m/s floor run. Measure both forward travel and lateral offset. If left/right counter deltas become equal (or nearly equal) and physical lateral drift falls substantially, adopt the gains as the initial straight-drive calibration.
+
+After straightness is corrected, perform one accurately measured longer run to finalize `meters_per_counter`, then change pose integration to cumulative `odl/odr`. Only after that should effective skid-steer track width / turning odometry be calibrated.
