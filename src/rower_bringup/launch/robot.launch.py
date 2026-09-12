@@ -39,13 +39,13 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'odom_meters_per_count',
-            default_value='0.0104',
-            description='Initial physical scale for cumulative odl/odr counters.',
+            default_value='0.0102',
+            description='Calibrated physical scale for cumulative odl/odr counters.',
         ),
         DeclareLaunchArgument(
             'track_width',
             default_value='0.172',
-            description='Current skid-steer track width used by odometry; turn calibration is next.',
+            description='Current skid-steer effective track width used by odometry; turn calibration is next.',
         ),
         Node(
             package='robot_state_publisher',
