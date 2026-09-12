@@ -22,6 +22,9 @@ def generate_launch_description():
     track_width = LaunchConfiguration('track_width')
     odom_yaw_scale_left = LaunchConfiguration('odom_yaw_scale_left')
     odom_yaw_scale_right = LaunchConfiguration('odom_yaw_scale_right')
+    command_rate_hz = LaunchConfiguration('command_rate_hz')
+    wheel_accel_limit = LaunchConfiguration('wheel_accel_limit')
+    wheel_decel_limit = LaunchConfiguration('wheel_decel_limit')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -59,6 +62,21 @@ def generate_launch_description():
             default_value='0.50',
             description='LiDAR-calibrated scale for right/CW wheel-counter yaw.',
         ),
+        DeclareLaunchArgument(
+            'command_rate_hz',
+            default_value='20.0',
+            description='Wheel command update rate. 20 Hz gives smoother slew-limited motion.',
+        ),
+        DeclareLaunchArgument(
+            'wheel_accel_limit',
+            default_value='0.12',
+            description='Maximum normal wheel acceleration in m/s^2.',
+        ),
+        DeclareLaunchArgument(
+            'wheel_decel_limit',
+            default_value='0.18',
+            description='Maximum normal wheel deceleration in m/s^2. Watchdog stops remain immediate.',
+        ),
         Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
@@ -92,6 +110,9 @@ def generate_launch_description():
                 'track_width': ParameterValue(track_width, value_type=float),
                 'odom_yaw_scale_left': ParameterValue(odom_yaw_scale_left, value_type=float),
                 'odom_yaw_scale_right': ParameterValue(odom_yaw_scale_right, value_type=float),
+                'command_rate_hz': ParameterValue(command_rate_hz, value_type=float),
+                'wheel_accel_limit': ParameterValue(wheel_accel_limit, value_type=float),
+                'wheel_decel_limit': ParameterValue(wheel_decel_limit, value_type=float),
             }],
         ),
     ])
