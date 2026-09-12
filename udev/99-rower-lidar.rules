@@ -1,0 +1,3 @@
+# Stable symlink for the LDROBOT STL-19P USB-UART adapter used on rower_gorod.
+# Detected adapter: Silicon Labs CP2102, VID:PID 10c4:ea60, serial 0001.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="0001", SYMLINK+="rower_lidar", GROUP="dialout", MODE="0660"
