@@ -27,135 +27,90 @@ SUMMARY: odom_samples=27 dx=0.1178m dy=0.0031m displacement=0.1178m max|linear.x
 OK: ROS /cmd_vel motion path and odometry response are present.
 ```
 
-This proves the complete software/firmware/encoder loop. It is **not** an odometry calibration result because the robot was lifted. With the chassis off the floor, the two skid-steer sides can accelerate and decelerate independently with essentially no tire-ground coupling. Instantaneous left/right encoder-speed differences can therefore create large transient `angular.z` values even though the commanded angular velocity is zero. The integrated distance also includes encoder motion while the wheels accelerate and settle after the command.
+This proves the complete software/firmware/encoder loop. It is **not** an odometry calibration result because the robot was lifted. With the chassis off the floor, the two skid-steer sides can accelerate and decelerate independently with essentially no tire-ground coupling. Instantaneous left/right encoder-speed differences can therefore create large transient `angular.z` values even though the commanded angular velocity is zero.
 
-Do not tune `track_width`, wheel scale, or Nav2 parameters from the lifted-wheel numbers.
+## Straight-line calibration
 
-## First straight floor run — 2026-09-12
+The project moved pose integration from instantaneous `L/R` speed feedback to cumulative `odl/odr` counter increments. Independent drive-side gains were added to compensate the measured drivetrain asymmetry.
 
-The robot was placed on the floor and commanded:
-
-```text
-linear.x = 0.06 m/s
-angular.z = 0
-duration = 1.5 s
-nominal commanded travel = 0.09 m
-```
-
-Observed ROS result:
-
-```text
-SUMMARY: odom_samples=28 dx=0.0752m dy=-0.0083m odom_distance=0.0756m dyaw=-12.69deg max|linear.x|=0.3802m/s max|angular.z|=2.2206rad/s
-```
-
-Physical observation:
-
-```text
-travel: approximately 90 mm
-straightness: confidently straight, no visible pull left/right
-```
-
-Physical travel agreed well with the commanded 90 mm, but the original ROS pose integration reported only 75.6 mm and a false yaw change of about -12.7 degrees even though the chassis visibly drove straight. That showed that pose integration from instantaneous `L/R` feedback was not trustworthy enough for SLAM/Nav2.
-
-## Second straight floor run — cumulative counter check
-
-Command:
-
-```text
-linear.x = 0.06 m/s
-angular.z = 0
-duration = 3.0 s
-nominal commanded travel = 0.18 m
-```
-
-Observed result:
-
-```text
-SUMMARY: odom_samples=22 dx=0.1613m dy=0.0110m odom_distance=0.1617m dyaw=6.32deg max|linear.x|=0.3799m/s max|angular.z|=2.2162rad/s
-RAW_COUNTERS: samples=21 odl=20->36 delta=16 odr=19->34 delta=15
-```
-
-Physical travel was approximately 170–180 mm. The cumulative counter deltas were nearly equal (`16` vs `15`) and matched the physical straightness better than the instantaneous velocity-derived yaw.
-
-## Third straight floor run — drivetrain asymmetry observed
-
-A 5 second / 0.06 m/s run produced:
-
-```text
-SUMMARY: odom_samples=32 dx=0.3041m dy=0.0127m odom_distance=0.3044m dyaw=-12.77deg max|linear.x|=0.3802m/s max|angular.z|=2.2206rad/s
-RAW_COUNTERS: samples=31 odl=38->66 delta=28 odr=36->62 delta=26 avg_delta=27.0 nominal_counter_distance=0.270m
-```
-
-Physical observation:
-
-```text
-forward travel: approximately 290 mm
-lateral drift: approximately 60 mm to the right
-```
-
-The left side accumulated about 7.7% more counter distance than the right side (`28` vs `26`), which matches the physical rightward curvature. To compensate, the command path was given independent left/right calibration gains:
+Final command-side defaults after floor testing:
 
 ```text
 left_command_scale  = 0.965
 right_command_scale = 1.035
 ```
 
-## Fourth straight floor run — drivetrain correction validated
+A corrected 5 s straight run at `linear.x=0.06 m/s` physically travelled approximately 290 mm and stayed straight. Counter deltas were balanced at `28 / 28` in one run and `28 / 29` in the following validation run.
 
-With the calibrated drive gains active, the same 5 second / 0.06 m/s test produced:
+The final straight validation with counter-based odometry produced:
 
 ```text
-SUMMARY: odom_samples=32 dx=0.2555m dy=-0.0890m odom_distance=0.2706m dyaw=-44.54deg max|linear.x|=0.1904m/s max|angular.z|=2.2139rad/s
-RAW_COUNTERS: samples=31 odl=68->96 delta=28 odr=64->92 delta=28 avg_delta=28.0 nominal_counter_distance=0.280m
+SUMMARY: odom_samples=32 dx=0.2960m dy=0.0121m odom_distance=0.2963m dyaw=3.46deg max|linear.x|=0.0800m/s max|angular.z|=0.1008rad/s
+RAW_COUNTERS: samples=31 odl=98->126 delta=28 odr=94->123 delta=29 avg_delta=28.5 nominal_counter_distance=0.285m
 ```
 
 Physical observation:
 
 ```text
-forward travel: approximately 290 mm
-straightness: physically straight / no meaningful side pull observed
+travel: approximately 290 mm
+straightness: straight
 ```
 
-The key result is `28 / 28`: the cumulative left and right wheel-side counters are now balanced, and the chassis physically drove straight. The previous false ROS yaw (`-44.54 deg`) therefore came from integrating the noisy instantaneous `L/R` samples, not from a real 44 degree turn.
+This confirms that counter-based pose and rolling-window twist estimation removed the previous large false velocity spikes. The remaining `3.46 deg` yaw on a physically straight run is explained by the coarse counter quantization: one count of left/right difference is already several degrees when divided by the current track width.
 
-The physical scale from this longer straight run is approximately:
+The straight-run physical scale was refined to:
 
 ```text
-0.290 m / 28 counts = 0.01036 m/count
+odom_meters_per_count = 0.0102 m/count
 ```
 
-Because the physical measurement was still approximate, the bridge uses a rounded initial value of:
+because `28.5 * 0.0102 = 0.2907 m`, closely matching the measured ~0.290 m.
+
+## First in-place turn calibration
+
+The first controlled turn used:
 
 ```text
-odom_meters_per_count = 0.0104 m/count
+angular.z = +0.80 rad/s
+command duration = 2.0 s
+direction = left / CCW
+nominal commanded angle = 91.7 deg
 ```
 
-This is close to the firmware's nominal 0.01 m/count representation and can be refined later with a longer taped measurement.
-
-## Odometry implementation after straight-line calibration
-
-`rower_base_bridge` now uses cumulative `odl` / `odr` counter increments as the primary pose source:
+Observed ROS/counter result:
 
 ```text
-dl = delta_odl * odom_meters_per_count
-dr = delta_odr * odom_meters_per_count
- ds = (dl + dr) / 2
-dtheta = (dr - dl) / track_width
+SUMMARY: odom_samples=18 dx=0.0061m dy=-0.0006m center_drift=0.0061m dyaw=50.97deg max|linear.x|=0.0170m/s max|angular.z|=0.6387rad/s
+RAW_COUNTERS: samples=17 odl=128->122 delta=-6 odr=124->132 delta=8 delta_difference=14
 ```
 
-The instantaneous Waveshare `L/R` fields are no longer integrated into `x/y/yaw`. They remain available in `/base/raw_feedback` for diagnostics.
+Physical heading change was estimated at approximately 45–50 degrees to the left. The robot rotated about its center with only small translational drift (~6 mm in ROS odometry).
 
-Because the cumulative counters are deliberately low-resolution, velocity is estimated over a rolling counter window rather than differentiating each individual count. This should remove the 0.38 m/s / 2.2 rad/s single-sample spikes from normal `/odom.twist` behavior.
-
-The drive correction gains are now the project defaults:
+Using the calibrated counter scale, the wheel-side differential path is:
 
 ```text
-left_command_scale  = 0.965
-right_command_scale = 1.035
+(dr - dl) = 14 counts * 0.0102 m/count = 0.1428 m
 ```
 
-The straight-line stage is therefore good enough to move on to validation of the new counter-based odometry and then effective skid-steer turning-width calibration.
+The effective track width inferred from the physical 45–50 degree estimate spans approximately:
+
+```text
+45 deg -> 0.1818 m
+50 deg -> 0.1637 m
+midpoint 47.5 deg -> ~0.1723 m
+```
+
+This is extremely close to the current `track_width = 0.172 m`. Therefore the current track width should **not** be changed from this first turn. A right-turn run is required to check symmetry and reduce uncertainty before locking the value for SLAM/Nav2.
 
 ## Next step
 
-Rebuild `rower_base_bridge` and `rower_bringup`, run the same 5 second straight probe once more, and verify that the new `/odom` result is near the physical ~0.29 m with near-zero final yaw when the raw counters finish equal. After that, calibrate effective `track_width` using a controlled in-place rotation before starting SLAM Toolbox.
+Run a controlled right/CW turn using the same calibrated bridge. A 3.0 s duration is preferred to collect more counter increments and reduce one-count quantization error:
+
+```bash
+python3 scripts/ros_floor_turn_probe.py \
+  --run \
+  --angular -0.80 \
+  --seconds 3.0
+```
+
+Measure the real clockwise heading change from floor marks and report the `SUMMARY` and `RAW_COUNTERS`. If the inferred effective track width again clusters around ~0.172 m, keep `track_width=0.172` and proceed to SLAM Toolbox validation.
