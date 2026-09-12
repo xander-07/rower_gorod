@@ -10,7 +10,7 @@ The competition computer stays on the existing Waveshare-compatible system:
 - Waveshare project: `~/ugv_rpi`;
 - Waveshare virtual environment: `~/ugv_rpi/ugv-env` (Python 3.11.2);
 - ROS 2 is not installed natively on the host;
-- Docker was initially not installed.
+- Docker Engine is installed on the host.
 
 The OS is intentionally **not replaced**, because the vendor Waveshare stack is required on this robot.
 
@@ -30,7 +30,7 @@ RViz should normally run on a development laptop, not on the Raspberry Pi 4.
 
 ## Host hardware paths already confirmed
 
-- base controller UART: `/dev/ttyAMA0` (also `/dev/serial0` on this image), 115200;
+- base controller UART: `/dev/ttyAMA0` (stable host alias `/dev/serial0` on this image), 115200;
 - STL-19P: `/dev/ttyUSB0`, 230400;
 - project lidar alias: `/dev/rower_lidar -> ttyUSB0`;
 - `T=1001` base feedback works;
@@ -61,12 +61,53 @@ The Docker image contains ROS 2 Jazzy ros-base plus:
 - CycloneDDS RMW;
 - pyserial and colcon tools.
 
+## RTU MIREA TLS inspection
+
+The RTU MIREA network performs HTTPS/TLS inspection using a private UserGate CA. The host trust store contains the local root CA at:
+
+```text
+/usr/local/share/ca-certificates/mirea-usergate-inspect.crt
+```
+
+`curl` and OpenSSL verification against `download.docker.com` were confirmed successful after installing that CA.
+
+`scripts/build_ros2_docker.sh` detects this local certificate and passes it to BuildKit as a secret. The certificate is used during image build so Ubuntu/ROS package installation works through the inspected network, without committing the private-network certificate to GitHub.
+
+## Build result on the real Raspberry Pi 4
+
+The image build completed successfully:
+
+```text
+rower-ros2:jazzy
+```
+
+Measured Docker image information:
+
+```text
+DISK USAGE:   4.74 GB
+CONTENT SIZE: 983 MB
+```
+
+ROS verification succeeded:
+
+```text
+ROS_DISTRO=jazzy
+ROS2_OK
+```
+
+The following required packages are present:
+
+```text
+nav2_bringup
+rmw_cyclonedds_cpp
+slam_toolbox
+```
+
 ## Install Docker on the Raspberry Pi
 
 ```bash
 cd ~/rower_gorod
 git pull
-chmod +x scripts/setup_docker_bookworm.sh
 ./scripts/setup_docker_bookworm.sh
 ```
 
@@ -89,7 +130,6 @@ docker run --rm hello-world
 
 ```bash
 cd ~/rower_gorod
-chmod +x scripts/build_ros2_docker.sh scripts/run_ros2_docker.sh
 ./scripts/build_ros2_docker.sh
 ```
 
@@ -106,7 +146,7 @@ Make sure the stock Waveshare app is still stopped:
 ```bash
 systemctl --user is-enabled ugv-app.service || true
 pgrep -af 'ugv_rpi/app.py' || true
-sudo fuser -v /dev/ttyUSB0 || true
+sudo fuser -v /dev/ttyUSB0 /dev/ttyAMA0 2>/dev/null || true
 ```
 
 Then:
@@ -116,12 +156,14 @@ cd ~/rower_gorod
 ./scripts/run_ros2_docker.sh
 ```
 
-The launcher uses host networking for ROS DDS and passes:
+The launcher resolves the stable host aliases to their real character devices and passes them into the container as project-specific names:
 
 ```text
-host /dev/ttyAMA0  -> container /dev/ttyAMA0
-host /dev/ttyUSB0  -> container /dev/rower_lidar
+host /dev/serial0      -> real UART device -> container /dev/rower_base
+host /dev/rower_lidar  -> real USB device  -> container /dev/rower_lidar
 ```
+
+This avoids depending on host kernel names such as `ttyAMA0` or `ttyUSB0` inside project code.
 
 It also bind-mounts the repository at:
 
@@ -143,15 +185,17 @@ echo "$ROS_DISTRO"
 echo "$RMW_IMPLEMENTATION"
 ros2 --help >/dev/null && echo ROS2_OK
 ros2 pkg list | grep -E '^(nav2_bringup|slam_toolbox)$'
-ls -l /dev/ttyAMA0 /dev/rower_lidar
+ls -l /dev/rower_base /dev/rower_lidar
 ```
 
 The existing safe Python hardware probes can also be run inside the container:
 
 ```bash
+python3 scripts/ugv_base_probe.py --port /dev/rower_base --seconds 3
 python3 scripts/stl19p_probe.py --port /dev/rower_lidar --frames 20
-python3 scripts/ugv_base_probe.py --port /dev/ttyAMA0 --seconds 3
 ```
+
+Both probes are non-motion tests.
 
 ## Planned ROS graph
 
