@@ -72,31 +72,58 @@ physical / ROS = 0.090 / 0.0756 ~= 1.19
 
 This is only a provisional observation because the physical measurement was approximate and the run was short. Do not hard-code this scale yet.
 
-## Next diagnostic: cumulative wheel odometer counters
+## Second straight floor run — cumulative counter check
 
-The Waveshare `T=1001` feedback also carries cumulative `odl` and `odr` counters. These are potentially much better for pose integration than numerically integrating the noisy instantaneous `L/R` speed samples.
-
-`rower_base_bridge` now republishes the useful raw T=1001 fields on:
+The next run used:
 
 ```text
-/base/raw_feedback
+linear.x = 0.06 m/s
+angular.z = 0
+duration = 3.0 s
+nominal commanded travel = 0.18 m
 ```
 
-as compact JSON containing:
+Observed ROS result:
 
 ```text
-L, R, odl, odr, v
+SUMMARY: odom_samples=22 dx=0.1613m dy=0.0110m odom_distance=0.1617m dyaw=6.32deg max|linear.x|=0.3799m/s max|angular.z|=2.2162rad/s
+RAW_COUNTERS: samples=21 odl=20->36 delta=16 odr=19->34 delta=15
 ```
 
-`scripts/ros_floor_straight_probe.py` now captures the start/end `odl/odr` counters and prints a `RAW_COUNTERS` line. The next straight run should be somewhat longer to reduce measurement uncertainty, while remaining slow and safe. Recommended command:
+Physical observation:
+
+```text
+travel: approximately 170-180 mm
+straightness: approximately straight / no reported visible pull
+```
+
+The left/right cumulative counter deltas are close (`16` vs `15`), which matches the visual straightness much better than the noisy instantaneous `L/R`-derived yaw. In the current Waveshare firmware the counters are transmitted as `int(en_odom_* * 100)`, so one integer count is nominally 0.01 m. The average raw delta of 15.5 counts therefore corresponds to a nominal 0.155 m before physical scale correction.
+
+Using the approximate midpoint of the physical estimate (0.175 m) would imply a provisional counter scale correction of about:
+
+```text
+0.175 / 0.155 ~= 1.13
+```
+
+but this must **not** be hard-coded yet because the physical measurement was only an estimate and the counters are quantized to whole centimetre-style units. The run does, however, strongly support switching pose integration from instantaneous `L/R` speed samples to cumulative `odl/odr` increments once their physical scale is measured accurately.
+
+The false ROS yaw is still present (`+6.32 deg`) even though the robot was visually straight. This confirms that instantaneous `L/R` speed samples should not be used directly for long-term heading integration.
+
+## Next calibration: longer precisely measured straight run
+
+Use a longer run so the 1-count quantization of `odl/odr` becomes a smaller percentage of the total distance. Mark the robot center before and after the run and measure with a ruler/tape, preferably to within a few millimetres.
+
+Recommended command:
 
 ```bash
 python3 scripts/ros_floor_straight_probe.py \
   --run \
   --speed 0.06 \
-  --seconds 3.0
+  --seconds 5.0
 ```
 
-Nominal travel is about 0.18 m. Measure the real center-to-center travel in millimetres and report whether the robot remained straight. Compare that physical distance to both raw counter deltas before changing the odometry implementation.
+Nominal commanded travel is 0.30 m. Use only with at least 1 m clear space ahead. The script now permits up to 6 seconds and reports `nominal_counter_distance` from the raw counters for convenience.
 
-Only after straight-line scale is understood should effective skid-steer track width / turning odometry be calibrated.
+After one accurately measured longer run, calculate the physical metres-per-counter scale. Then update `rower_base_bridge` to integrate pose from cumulative `odl/odr` deltas. Keep instantaneous `L/R` only as velocity telemetry (and potentially filter it) rather than as the primary pose source.
+
+Only after straight-line scale is fixed should effective skid-steer track width / turning odometry be calibrated.
