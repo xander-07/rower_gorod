@@ -39,6 +39,8 @@ class RowerBaseBridge(Node):
         self.declare_parameter('command_rate_hz', 10.0)
         self.declare_parameter('cmd_timeout', 0.35)
         self.declare_parameter('max_wheel_speed', 0.25)
+        self.declare_parameter('left_command_scale', 1.0)
+        self.declare_parameter('right_command_scale', 1.0)
 
         self.serial_port = str(self.get_parameter('serial_port').value)
         self.baud = int(self.get_parameter('baud').value)
@@ -50,6 +52,8 @@ class RowerBaseBridge(Node):
         self.command_rate_hz = float(self.get_parameter('command_rate_hz').value)
         self.cmd_timeout = float(self.get_parameter('cmd_timeout').value)
         self.max_wheel_speed = float(self.get_parameter('max_wheel_speed').value)
+        self.left_command_scale = float(self.get_parameter('left_command_scale').value)
+        self.right_command_scale = float(self.get_parameter('right_command_scale').value)
 
         if self.track_width <= 0.0:
             raise ValueError('track_width must be > 0')
@@ -59,6 +63,10 @@ class RowerBaseBridge(Node):
             raise ValueError('cmd_timeout must be > 0')
         if self.max_wheel_speed <= 0.0:
             raise ValueError('max_wheel_speed must be > 0')
+        if not (0.5 <= self.left_command_scale <= 1.5):
+            raise ValueError('left_command_scale must be in 0.5..1.5')
+        if not (0.5 <= self.right_command_scale <= 1.5):
+            raise ValueError('right_command_scale must be in 0.5..1.5')
 
         self.odom_pub = self.create_publisher(Odometry, 'odom', 20)
         self.battery_pub = self.create_publisher(BatteryState, 'battery', 10)
@@ -102,7 +110,9 @@ class RowerBaseBridge(Node):
         self.create_timer(1.0 / self.command_rate_hz, self._command_timer)
 
         self.get_logger().info(
-            f'Opened {self.serial_port} at {self.baud} baud; track_width={self.track_width:.3f} m'
+            f'Opened {self.serial_port} at {self.baud} baud; '
+            f'track_width={self.track_width:.3f} m; '
+            f'drive_scales L={self.left_command_scale:.3f} R={self.right_command_scale:.3f}'
         )
 
     def _send_json(self, payload: dict) -> None:
@@ -133,8 +143,11 @@ class RowerBaseBridge(Node):
             linear = self._cmd_linear
             angular = self._cmd_angular
 
-        left = linear - angular * self.track_width / 2.0
-        right = linear + angular * self.track_width / 2.0
+        # First compute the ideal skid-steer wheel-side commands, then apply
+        # independent calibration gains. This compensates repeatable left/right
+        # drivetrain asymmetry without changing ROS cmd_vel semantics.
+        left = (linear - angular * self.track_width / 2.0) * self.left_command_scale
+        right = (linear + angular * self.track_width / 2.0) * self.right_command_scale
         left = max(-self.max_wheel_speed, min(self.max_wheel_speed, left))
         right = max(-self.max_wheel_speed, min(self.max_wheel_speed, right))
         self._send_json({'T': 1, 'L': round(left, 4), 'R': round(right, 4)})
