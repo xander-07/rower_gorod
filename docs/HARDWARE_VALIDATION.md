@@ -76,46 +76,36 @@ For the future ROS 2 bridge, `T=1` is currently preferred as the transport comma
 
 The initial feedback showed `moduleType=1` behavior: RoArm bus-servo messages (`T=1005`) and `ax/ay/az` overwritten by arm coordinates.
 
-A safe non-motion test was executed:
-
-```bash
-python3 scripts/ugv_set_base_mode.py --port /dev/serial0 --seconds 4
-```
-
-The command sent was only:
+A safe base-only test sent:
 
 ```json
 {"T":4,"cmd":0}
 ```
 
-Observed result:
+The switch succeeded. After the transition, `T=1005` messages stopped and normal `T=1001` base feedback continued. During the 4-second observation the controller produced 79 `T=1001` messages and only two residual `T=1005` messages immediately after the mode change. Battery feedback at that point was `v=1193`, approximately `11.93 V`.
+
+A separate 8-second IMU activity test kept `moduleType=0` while the robot chassis was manually tilted and rotated. Result:
 
 ```text
-SUMMARY: T1001=79 T1005=2 other=0 malformed=0 first_raw_acc=(-250.1553416, 3.063519383e-14, -236.82) last_raw_acc=(0, 0, 0)
-OK: moduleType=0 command was sent and base feedback is present.
+SUMMARY: T1001=161 T1005=0 malformed=0
+RANGES:
+  gx: 0 .. 0
+  gy: 0 .. 0
+  gz: 0 .. 0
+  ax: 0 .. 0
+  ay: 0 .. 0
+  az: 0 .. 0
+  mx: 0 .. 0
+  my: 0 .. 0
+  mz: 0 .. 0
+NO IMU DATA: all observed gyro/accel/mag fields remained zero.
 ```
 
-Interpretation:
-
-- switching to `moduleType=0` succeeded;
-- only two `T=1005` packets appeared immediately after the switch, consistent with already-buffered servo messages; after that the base stream was clean;
-- battery feedback during this test was `v=1193`, i.e. approximately `11.93 V`;
-- the first `ax/ay/az` sample still contained the previous RoArm coordinates, but all subsequent `gx/gy/gz`, `ax/ay/az`, and `mx/my/mz` values were zero;
-- therefore the installed firmware does **not yet have a validated usable IMU stream**. Zero fields may mean that the current DMP/raw-sensor path is not producing samples; this does not affect the already-confirmed motor, encoder, battery, or lidar paths.
-
-The public Waveshare ROS firmware reads ICM-20948 DMP FIFO data in the main loop and only updates raw accel/gyro/magnetometer variables when the corresponding DMP header bits are present. Its orientation/quaternion processing is currently commented out. Therefore IMU functionality must be validated independently rather than assumed from the presence of the hardware.
-
-A safe activity probe has been added:
-
-```bash
-python3 scripts/ugv_imu_probe.py --port /dev/serial0 --seconds 8
-```
-
-It sends no motor commands. During the test, slowly tilt and rotate the robot by hand. The script reports min/max values for gyro, accelerometer and magnetometer fields and determines whether they actually change.
+Therefore the built-in ICM-20948 data path is **not considered usable for the first navigation stack**. The robot can proceed with wheel odometry + STL-19P + SLAM Toolbox/Nav2. The IMU can be repaired later in the ESP32 firmware or replaced with a separate sensor without blocking the current project.
 
 ## Current hardware conclusion
 
-The following hardware paths are proven:
+The following hardware paths are now proven:
 
 ```text
 STL-19P -> CP2102 -> Raspberry Pi 5           OK
@@ -124,8 +114,8 @@ ESP32 T=1 left/right velocity control          OK
 ESP32 T=13 X/Z velocity control                OK
 wheel encoders / odometry feedback             OK
 battery voltage feedback                       OK
-moduleType=0 base-only selection               OK
-IMU data stream                                 NOT YET VALIDATED (currently zeros)
+base-only module mode                           OK
+built-in IMU data stream                        NOT USABLE (all zeros)
 ```
 
-The robot can proceed to ROS 2 base/lidar integration even if the built-in IMU remains unavailable. Wheel odometry plus lidar localization/SLAM are sufficient for the first navigation stack; IMU can be added later after firmware repair or with a separate sensor.
+Next: move the competition software to Ubuntu 24.04 arm64 + ROS 2 Jazzy on separate media, re-run the safe hardware probes, then build the ROS 2 base/lidar integration.
