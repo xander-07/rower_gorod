@@ -241,7 +241,34 @@ The conservative Nav2 footprint based on the outer wheel envelope is:
  [-0.126,  0.115]]
 ```
 
-These values are implemented in `rower_description`. The +40 mm X offset is the midpoint of the measured +35..+45 mm range and can be refined later. The +90 degree yaw should be visually verified in RViz/SLAM by checking that a physical obstacle on the robot's left appears at the corresponding side of the scan.
+These values are implemented in `rower_description`. The +40 mm X offset is the midpoint of the measured +35..+45 mm range and can be refined later.
+
+## Bringup / TF validation
+
+`rower_description` and `rower_bringup` build successfully together with the base and lidar packages:
+
+```text
+Summary: 4 packages finished [14.4s]
+```
+
+`ros2 launch rower_bringup robot.launch.py` successfully starts:
+
+- `robot_state_publisher`;
+- `rower_lidar`;
+- `rower_base_bridge` in motion-disabled mode.
+
+The lidar remained stable during bringup, reaching more than 56k serial frames with zero CRC errors in the observed run. Ctrl+C shut down all three launched processes cleanly.
+
+The fixed transform was measured through TF as:
+
+```text
+base_link -> laser
+Translation: [0.040, 0.000, 0.116]
+RPY degrees: [0.000, -0.000, 90.000]
+Quaternion xyzw: [0.000, 0.000, 0.707, 0.707]
+```
+
+The complete dynamic chain `odom -> base_link -> laser` was also resolved successfully. The one initial `Invalid frame ID` message from `tf2_echo` occurred only during startup before the first dynamic `odom` transform arrived; subsequent transforms were continuous and correct.
 
 ## Current conclusion
 
@@ -255,6 +282,9 @@ ROS /scan at ~9.91 Hz                                  OK
 ROS /odom at ~20 Hz                                    OK
 ROS /battery                                           OK
 ROS odom -> base_link TF                               OK
+ROS base_link -> laser static TF                       OK
+ROS odom -> base_link -> laser full TF chain           OK
+rower_bringup unified launch                           OK
 ESP32 T=1 left/right velocity control                  OK
 ESP32 T=13 X/Z velocity control                        OK
 wheel encoders / odometry feedback                     OK
@@ -264,4 +294,4 @@ built-in IMU data stream                               NOT USABLE (all zeros)
 robot envelope / lidar mounting geometry               RECORDED
 ```
 
-Next: build `rower_description` and `rower_bringup`, validate `base_link -> laser` in the TF tree, then start SLAM Toolbox. Motion remains disabled until the navigation frame geometry is verified.
+Next: validate the complete ROS `/cmd_vel -> rower_base_bridge -> ESP32 -> encoder -> /odom` motion path with all six wheels lifted. After that, perform slow floor calibration and start SLAM Toolbox. A guarded helper is provided as `scripts/ros_motion_probe.py`.
