@@ -148,6 +148,62 @@ The Docker image `rower-ros2:jazzy` is built and confirmed working on the Raspbe
 
 The image occupies approximately 4.74 GB of local disk space. Both physical serial devices have been validated from inside the container.
 
+## ROS node validation
+
+The first real project packages build successfully with colcon:
+
+```text
+Summary: 2 packages finished [7.60s]
+rower_base_bridge base_bridge
+rower_lidar lidar_node
+```
+
+### `rower_lidar`
+
+The node opens `/dev/rower_lidar` at 230400 and publishes `sensor_msgs/msg/LaserScan` on `/scan` with frame `laser`.
+
+Measured ROS topic rate:
+
+```text
+average rate: approximately 9.91 Hz
+min: approximately 0.093 s
+max: approximately 0.107 s
+```
+
+A long run reached approximately 143451 valid serial frames and 3424 published scans with only one observed CRC error. The single CRC error is negligible relative to the total frame count and the driver recovered automatically.
+
+### `rower_base_bridge`
+
+The bridge was started with its default safe configuration:
+
+```text
+Motion is DISABLED (enable_motion:=false). Telemetry/odometry only.
+Opened /dev/rower_base at 115200 baud; track_width=0.172 m
+```
+
+After the bridge sends the safe RAM-only `T=4,cmd=0` base-mode command, `/odom` is published at approximately 20 Hz.
+
+Stationary odometry was confirmed:
+
+```text
+frame_id: odom
+child_frame_id: base_link
+position x: 0.0
+position y: 0.0
+orientation w: 1.0
+linear.x: 0.0
+angular.z: 0.0
+```
+
+Battery telemetry was confirmed on `/battery`:
+
+```text
+voltage: 12.140000343322754
+present: true
+```
+
+The bridge also publishes the `odom -> base_link` transform on `/tf`. `/cmd_vel` exists as a subscription but is ignored for motor output while `enable_motion=false`.
+
 ## Current conclusion
 
 ```text
@@ -156,6 +212,10 @@ Docker / Ubuntu Noble / ROS 2 Jazzy                   OK
 host -> Docker -> ESP32 UART feedback                  OK
 host -> Docker -> STL-19P serial                       OK
 STL-19P CRC / full angular wrap                        OK
+ROS /scan at ~9.91 Hz                                  OK
+ROS /odom at ~20 Hz                                    OK
+ROS /battery                                           OK
+ROS odom -> base_link TF                               OK
 ESP32 T=1 left/right velocity control                  OK
 ESP32 T=13 X/Z velocity control                        OK
 wheel encoders / odometry feedback                     OK
@@ -164,4 +224,4 @@ base-only module selection via T=4,cmd=0               OK (RAM only)
 built-in IMU data stream                               NOT USABLE (all zeros)
 ```
 
-Next: build and validate the ROS 2 `rower_base_bridge` and `rower_lidar` nodes, initially with drive motion disabled, then add robot description/TF and SLAM Toolbox.
+Next: add the fixed `base_link -> laser` transform and robot description, then validate the full TF tree before starting SLAM Toolbox. Motion remains disabled until the navigation frame geometry is verified.
