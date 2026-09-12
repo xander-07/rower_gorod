@@ -1,195 +1,143 @@
-# Платформа Raspberry Pi 5 — текущее состояние и план
+# Платформа Raspberry Pi 4 — текущее состояние
 
 Дата диагностики: 2026-09-12.
 
-## Текущее состояние Raspberry Pi 5
+## Актуальная конфигурация
 
-По выводу с робота:
+Подтверждено на реальном роботе:
 
-- ОС: Debian GNU/Linux 12 (bookworm).
-- Raspberry Pi: RPi 5, 8 GB.
-- ROS 2 в текущей системе не установлен (`ROS_DISTRO` пустой).
-- UART базы доступен как `/dev/serial0 -> /dev/ttyAMA0`.
-- USB-UART лидара доступен как `/dev/ttyUSB0`.
-- USB-UART определяется как Silicon Labs CP2102 (`10c4:ea60`), serial `0001`.
-- Стабильный системный путь устройства: `/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0`.
-- Установлено правило udev, создающее `/dev/rower_lidar -> ttyUSB0`.
+- Raspberry Pi 4, 4 GB RAM;
+- Debian GNU/Linux 12 (Bookworm), arm64/aarch64;
+- Python 3.11.2;
+- Waveshare `ugv_rpi` находится в `~/ugv_rpi`;
+- штатное окружение Waveshare: `~/ugv_rpi/ugv-env`, Python 3.11.2;
+- свободно/доступно около 3.2 GiB RAM в момент диагностики;
+- swap: 512 MiB;
+- Docker изначально не установлен;
+- ОС не меняем, так как именно эта конфигурация нужна для рабочего Waveshare-стека.
 
-## База Waveshare UGV02
+## Waveshare UGV02
 
-Штатный Raspberry Pi код Waveshare работает с нижним ESP32 через GPIO UART 115200 бод. Для Raspberry Pi 5 в `waveshareteam/ugv_rpi/base_ctrl.py` используется `/dev/ttyAMA0`.
-
-Текущая ROS-версия прошивки нижнего контроллера Waveshare содержит нативную команду линейной/угловой скорости:
-
-```json
-{"T":13,"X":0.1,"Z":0.3}
-```
-
-где `X` задаётся в м/с, а `Z` — в рад/с. В актуальных исходниках Waveshare `rosCtrl()` преобразует их в левую/правую скорость через ширину колеи.
-
-Также штатно поддерживается команда независимой скорости сторон:
-
-```json
-{"T":1,"L":0.1,"R":0.1}
-```
-
-В обработчике актуальной прошивки `T=1` дополнительно обновляет heartbeat (`lastCmdRecvTime`) и снимает `heartbeatStopFlag`, тогда как обработчик `T=13` этого не делает. Стандартный heartbeat timeout равен 3000 мс. Это важно учитывать при проектировании `rower_base_bridge`.
-
-### Подтверждённая обратная телеметрия
-
-Read-only проверка реального робота:
-
-```bash
-python3 scripts/ugv_base_probe.py --port /dev/serial0 --seconds 5
-```
-
-успешно подтвердила поток JSON от ESP32:
-
-- `/dev/serial0`, 115200 бод работает;
-- за 4.24 с принято 50 корректных JSON сообщений;
-- из них 10 сообщений `T=1001` с базовой телеметрией;
-- битых JSON не обнаружено;
-- на неподвижном роботе `L=0`, `R=0`, `odl=0`, `odr=0`;
-- поле `v=1200` соответствует `12.00 V`, потому что прошивка передаёт `loadVoltage_V * 100`.
-
-Прошивка Waveshare формирует `T=1001` из фактических скоростей колёс (`speedGetA`, `speedGetB`), одометрии, IMU и напряжения. Значит этот поток можно использовать в будущем ROS 2 bridge для `odom`, диагностики батареи и, после корректной настройки модуля, IMU.
-
-### Важное обнаружение: активен режим RoArm
-
-Во время теста постоянно приходили:
+Интерфейс нижнего ESP32:
 
 ```text
-T=1005 id=11
-T=1005 id=12
-T=1005 id=14
-T=1005 id=15
+/dev/serial0 -> /dev/ttyAMA0
+115200 baud
+newline-delimited JSON
 ```
 
-а значения `ax/ay/az` выглядели как координаты манипулятора, например `(-250.155, ~0, -236.82)`, а не как обычное ускорение.
+Подтверждено:
 
-Это согласуется с исходниками Waveshare: если `moduleType == 1` (RoArm-M2), функция `baseInfoFeedback()` **перезаписывает** поля `ax`, `ay`, `az` значениями `lastX`, `lastY`, `lastZ` манипулятора. Поэтому текущие `ax/ay/az` нельзя использовать как акселерометр до переключения модуля в base-only режим.
+- `T=1001` telemetry;
+- `T=1` left/right velocity control;
+- `T=13` ROS-style X/Z velocity control;
+- энкодеры и одометрия;
+- напряжение батареи (`v / 100` = V).
 
-Команда текущей прошивки для выбора модуля:
+Для будущего `rower_base_bridge` предпочтителен `T=1`, потому что в актуальной прошивке Waveshare его обработчик обновляет heartbeat. Преобразование ROS `linear.x` / `angular.z` в `L/R` будет выполняться в нашем узле.
 
-```json
-{"T":4,"cmd":0}
-```
+## Built-in IMU
 
-где `0` — без RoArm/gimbal. `changeModuleType()` меняет переменную `moduleType` в RAM; это не постоянная запись конфигурации. В будущем `rower_base_bridge` сможет явно выставлять нужный режим при старте.
-
-### Первый тест `T=13`
-
-Первый защищённый тест был выполнен с параметрами:
-
-```bash
-python3 scripts/ugv_ros_ctrl_test.py \
-  --port /dev/serial0 \
-  --speed 0.08 \
-  --duration 0.5 \
-  --run
-```
-
-Результат:
+После переключения в `moduleType=0` и ручных наклонов/поворотов получено:
 
 ```text
-SUMMARY: T1001=1, max|L|=0.0000, max|R|=0.0000, odom_changed=False
+SUMMARY: T1001=161 T1005=0 malformed=0
+RANGES:
+  gx: 0 .. 0
+  gy: 0 .. 0
+  gz: 0 .. 0
+  ax: 0 .. 0
+  ay: 0 .. 0
+  az: 0 .. 0
+  mx: 0 .. 0
+  my: 0 .. 0
+  mz: 0 .. 0
 ```
 
-То есть при `0.08 m/s` в течение `0.5 s` движение энкодерами не зарегистрировано. Этот результат **не доказывает**, что `T=13` отсутствует: тест был коротким, пришёл только один пакет `T=1001`, а в актуальной прошивке есть порог `THRESHOLD_PWM=23` в PID-тракте.
-
-Для более надёжного сравнения добавлен `scripts/ugv_motion_test.py`. Он умеет отдельно проверять два пути управления, повторяя команду с частотой 10 Гц:
-
-```bash
-# Штатный T=1: скорости левой/правой стороны
-python3 scripts/ugv_motion_test.py --mode t1 --speed 0.15 --duration 1.5 --run
-
-# ROS-style T=13: X/Z
-python3 scripts/ugv_motion_test.py --mode t13 --speed 0.15 --duration 1.5 --run
-```
-
-Оба теста разрешены только когда все 6 колёс подняты над полом. В конце отправляется нулевая скорость и `T=0`.
-
-Если `T=1` движет колёса, а `T=13` при тех же условиях нет, то для текущей установленной прошивки `rower_base_bridge` следует строить на `T=1` и самостоятельно преобразовывать ROS `linear.x/angular.z` в левую/правую скорости. Для UGV Rover в актуальных исходниках Waveshare ширина колеи указана как `TRACK_WIDTH = 0.172 m`.
+Поэтому встроенный IMU не используется в первой версии навигации. Это не блокирует SLAM/Nav2: используем wheel odometry + STL-19P.
 
 ## LDROBOT STL-19P
 
-STL-19P использует односторонний UART поток со скоростью 230400 бод, 8 бит, 1 стоп-бит, без parity и flow control. Формат пакета совместим с семейством LD19/STL-19P.
+Подтверждено:
 
-Для безопасной проверки добавлен скрипт:
+- CP2102 `10c4:ea60`, serial `0001`;
+- 230400 baud;
+- 47-byte LD19/STL-19P packets;
+- 12 points/frame;
+- 50/50 CRC-valid frames;
+- 592/600 valid points;
+- ~9.91–9.93 Hz spin rate;
+- полный проход 360 -> 0 градусов.
 
-```bash
-python3 scripts/stl19p_probe.py --port /dev/rower_lidar --frames 50
-```
-
-Скрипт только читает порт и ничего не отправляет в лидар.
-
-### Подтверждённые результаты STL-19P
-
-Проверка на реальном роботе успешно приняла 50 последовательных пакетов:
-
-- `50/50` пакетов прошли CRC8;
-- 592 валидные точки из 600 переданных;
-- скорость вращения около `3566–3573 deg/s`, то есть `9.91–9.93 Hz`;
-- углы последовательно проходят через границу `360° -> 0°`, что подтверждает непрерывный полный обзор;
-- расстояния имеют физически правдоподобные значения от примерно 0.14 м до более 13 м;
-- физический интерфейс подтверждён: CP2102, 230400 бод.
-
-Таким образом, аппаратный тракт STL-19P -> CP2102 -> Raspberry Pi 5 считается подтверждённым.
-
-### Постоянное имя лидара
-
-В репозитории есть правило:
+Постоянное имя:
 
 ```text
-udev/99-rower-lidar.rules
+/dev/rower_lidar -> /dev/ttyUSB0
 ```
 
-После установки оно создаёт:
-
-```text
-/dev/rower_lidar
-```
-
-Установка и проверка:
+Установка udev rule:
 
 ```bash
+cd ~/rower_gorod
 chmod +x scripts/install_udev_rules.sh
 ./scripts/install_udev_rules.sh
-ls -l /dev/rower_lidar
 ```
 
-На реальном RPi подтверждено:
+## Конфликт со штатным `ugv_rpi/app.py`
 
-```text
-/dev/rower_lidar -> ttyUSB0
-```
+`ugv_rpi/app.py` автоматически открывает первый `/dev/ttyUSB*` и конфликтует с STL-19P.
 
-### Конфликт со штатным `ugv_rpi/app.py`
-
-В текущем `waveshareteam/ugv_rpi/base_ctrl.py` при запуске приложения автоматически открывается первый `/dev/ttyUSB*` на 115200 бод как порт дополнительного датчика. Если STL-19P подключён через CP2102 как `/dev/ttyUSB0`, штатный `app.py` одновременно читает этот же порт и мешает лидару.
-
-На роботе приложение запускается пользовательским systemd unit:
+На роботе приложение запускается user service:
 
 ```text
 ~/.config/systemd/user/ugv-app.service
 ```
 
-В unit установлен `Restart=always`, поэтому обычный `pkill` приводит к автоматическому перезапуску приложения. Для текущей разработки сервис остановлен и отключён из `default.target`.
+В unit установлен `Restart=always`. Во время автономной разработки сервис должен оставаться отключенным:
 
-Штатный `ugv-jupyter.service` можно оставить запущенным.
+```bash
+systemctl --user disable ugv-app.service
+systemctl --user stop ugv-app.service
+```
 
-## Важный момент по ROS 2
+Проверка:
 
-Для ROS 2 Jazzy основной Tier 1 Linux — Ubuntu 24.04 (Noble), включая arm64. Debian Bookworm не является основной поддерживаемой платформой Jazzy для Raspberry Pi arm64. Поэтому для соревновательного робота предпочтителен Ubuntu 24.04 arm64 с ROS 2 Jazzy, а текущую Debian-карту Waveshare желательно сохранить как резервную.
+```bash
+pgrep -af 'ugv_rpi/app.py' || true
+sudo fuser -v /dev/ttyUSB0 || true
+```
 
-Альтернативный вариант — оставить Debian 12 на хосте и запускать ROS 2 Jazzy/Nav2 в Ubuntu 24.04 arm64 контейнере с пробросом `/dev/ttyAMA0` и `/dev/rower_lidar`. Это сохраняет штатную систему Waveshare, но усложняет запуск RViz, камеры и сервисов.
+`ugv-jupyter.service` можно оставить запущенным, пока он не захватывает нужные serial devices.
 
-## Следующий этап
+## ROS 2
 
-1. С поднятыми над полом колёсами сравнить `T=1` и `T=13` через `scripts/ugv_motion_test.py`.
-2. Зафиксировать рабочий транспорт управления для `rower_base_bridge`.
-3. Переключить `moduleType` в base-only режим и проверить настоящие IMU-поля.
-4. Определить вариант ROS 2: Ubuntu 24.04 arm64 (предпочтительно) или контейнер на Debian 12.
-5. Создать `rower_base_bridge` и драйвер `/scan`.
-6. Добавить TF, одометрию и IMU.
-7. Подключить SLAM Toolbox и Nav2.
+ROS 2 Jazzy не устанавливаем прямо в Debian 12 host. Вместо смены ОС используем официальный Ubuntu 24.04 arm64 ROS 2 container поверх Docker.
+
+Файлы проекта:
+
+```text
+docker/Dockerfile
+scripts/setup_docker_bookworm.sh
+scripts/build_ros2_docker.sh
+scripts/run_ros2_docker.sh
+```
+
+Подробно: `docs/ROS2_SETUP.md`.
+
+## Целевая схема
+
+```text
+Debian 12 / Raspberry Pi 4
+├── Waveshare vendor stack: ~/ugv_rpi
+├── project: ~/rower_gorod
+└── Docker
+    └── ROS 2 Jazzy / Ubuntu 24.04 arm64
+        ├── rower_base_bridge
+        ├── rower_lidar
+        ├── rower_description
+        ├── rower_bringup
+        ├── SLAM Toolbox
+        └── Nav2
+```
+
+RViz планируется запускать на отдельном ноутбуке в той же сети, чтобы не нагружать Raspberry Pi 4 графикой.
