@@ -11,6 +11,7 @@ from geometry_msgs.msg import TransformStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import BatteryState
+from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
 
 import serial
@@ -61,6 +62,9 @@ class RowerBaseBridge(Node):
 
         self.odom_pub = self.create_publisher(Odometry, 'odom', 20)
         self.battery_pub = self.create_publisher(BatteryState, 'battery', 10)
+        # Calibration/debug topic. It republishes the useful numeric fields from
+        # T=1001 as compact JSON without requiring a second process to open UART.
+        self.raw_feedback_pub = self.create_publisher(String, 'base/raw_feedback', 20)
         self.cmd_sub = self.create_subscription(Twist, 'cmd_vel', self._cmd_vel_cb, 10)
         self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
 
@@ -164,6 +168,19 @@ class RowerBaseBridge(Node):
             right = float(msg.get('R', 0.0))
         except (TypeError, ValueError):
             return
+
+        # Preserve the controller's cumulative odometer counters for calibration.
+        # We intentionally do not assume a final physical scale here yet.
+        raw_feedback = {
+            'L': left,
+            'R': right,
+            'odl': msg.get('odl'),
+            'odr': msg.get('odr'),
+            'v': msg.get('v'),
+        }
+        raw_msg = String()
+        raw_msg.data = json.dumps(raw_feedback, separators=(',', ':'))
+        self.raw_feedback_pub.publish(raw_msg)
 
         now_mono = time.monotonic()
         if self._last_feedback_time is not None:
