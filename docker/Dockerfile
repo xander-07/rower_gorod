@@ -27,7 +27,7 @@ RUN --mount=type=secret,id=local_ca,target=/usr/local/share/ca-certificates/rowe
        ros-jazzy-tf2-tools \
        ros-jazzy-teleop-twist-keyboard \
        ros-jazzy-rmw-cyclonedds-cpp \
-       ros-jazzy-foxglove-bridge \
+       ros-jazzy-rosbridge-server \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/rower_gorod
