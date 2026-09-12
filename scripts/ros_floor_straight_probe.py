@@ -92,7 +92,7 @@ def main() -> int:
     )
     parser.add_argument('--run', action='store_true', help='Required to allow floor motion.')
     parser.add_argument('--speed', type=float, default=0.06, help='Forward command in m/s (0.03..0.10).')
-    parser.add_argument('--seconds', type=float, default=1.5, help='Command duration in seconds (0.5..6.0).')
+    parser.add_argument('--seconds', type=float, default=1.5, help='Command duration in seconds (0.5..40.0).')
     parser.add_argument('--rate', type=float, default=10.0, help='cmd_vel publish rate in Hz (5..20).')
     args = parser.parse_args()
 
@@ -102,18 +102,29 @@ def main() -> int:
     if not (0.03 <= args.speed <= 0.10):
         print('ERROR: --speed must be between 0.03 and 0.10 m/s for floor calibration.')
         return 2
-    if not (0.5 <= args.seconds <= 6.0):
-        print('ERROR: --seconds must be between 0.5 and 6.0 s.')
+    if not (0.5 <= args.seconds <= 40.0):
+        print('ERROR: --seconds must be between 0.5 and 40.0 s.')
         return 2
     if not (5.0 <= args.rate <= 20.0):
         print('ERROR: --rate must be between 5 and 20 Hz.')
         return 2
 
+    nominal_travel = args.speed * args.seconds
+    if nominal_travel > 2.2:
+        print(
+            'ERROR: guarded floor test is limited to 2.2 m nominal travel. '
+            'Reduce --speed or --seconds.'
+        )
+        return 2
+
     print('FLOOR MOTION TEST ENABLED.')
-    print('Place the robot on a clear, flat floor with at least 1 m free space in front.')
+    print(
+        f'Place the robot on a clear, flat floor with at least '
+        f'{nominal_travel + 0.5:.1f} m free space in front.'
+    )
     print('Be ready to stop the bringup terminal with Ctrl+C if the robot behaves unexpectedly.')
     print(f'Command: linear.x={args.speed:.3f} m/s, angular.z=0 for {args.seconds:.2f}s')
-    print(f'Nominal commanded travel (before acceleration/deceleration): {args.speed * args.seconds:.3f} m')
+    print(f'Nominal commanded travel (before acceleration/deceleration): {nominal_travel:.3f} m')
     print('Starting in 3 seconds...')
     time.sleep(3.0)
 
