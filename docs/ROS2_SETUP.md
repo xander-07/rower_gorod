@@ -1,132 +1,159 @@
-# ROS 2 Jazzy setup for the competition Raspberry Pi 5
+# ROS 2 Jazzy on the existing Waveshare Raspberry Pi OS
 
-## Decision
+## Confirmed host platform
 
-Use a separate microSD card or SSD with **Ubuntu Server 24.04 LTS 64-bit (arm64)** for the competition system. Keep the current Waveshare Debian 12 image unchanged as a fallback.
+The competition computer stays on the existing Waveshare-compatible system:
 
-ROS 2 Jazzy officially supports Ubuntu 24.04 (Noble) on 64-bit ARM. The project therefore does not install Jazzy directly into the existing Debian 12 Waveshare image.
+- Raspberry Pi 4, 4 GB RAM;
+- Debian GNU/Linux 12 (Bookworm), arm64/aarch64;
+- Python 3.11.2;
+- Waveshare project: `~/ugv_rpi`;
+- Waveshare virtual environment: `~/ugv_rpi/ugv-env` (Python 3.11.2);
+- ROS 2 is not installed natively on the host;
+- Docker was initially not installed.
 
-The Raspberry Pi image should be headless. RViz can be run later on a development PC if desired; the robot itself only needs ROS base, Nav2, SLAM Toolbox and project nodes.
+The OS is intentionally **not replaced**, because the vendor Waveshare stack is required on this robot.
 
-## Before changing media
+## ROS decision
 
-The real robot hardware has already been validated on the existing Debian installation:
+Run **ROS 2 Jazzy inside an Ubuntu 24.04 arm64 Docker container**, while keeping Debian 12 and `ugv_rpi` unchanged on the host.
 
-- base UART: `/dev/serial0 -> /dev/ttyAMA0`, 115200 baud;
-- STL-19P: CP2102, 230400 baud;
-- stable lidar alias: `/dev/rower_lidar`;
+Reasons:
+
+- official Jazzy binary packages target Ubuntu 24.04 arm64;
+- the official `ros:jazzy-ros-base-noble` image is available for linux/arm64;
+- Docker Engine supports Debian 12 arm64;
+- this isolates ROS dependencies from the vendor Python environment;
+- the robot can keep the known-working Waveshare host configuration.
+
+RViz should normally run on a development laptop, not on the Raspberry Pi 4.
+
+## Host hardware paths already confirmed
+
+- base controller UART: `/dev/ttyAMA0` (also `/dev/serial0` on this image), 115200;
+- STL-19P: `/dev/ttyUSB0`, 230400;
+- project lidar alias: `/dev/rower_lidar -> ttyUSB0`;
 - `T=1001` base feedback works;
-- `T=1` and `T=13` motor control both work;
+- `T=1` and `T=13` motor control work;
 - wheel encoders/odometry work;
-- battery voltage feedback works;
-- built-in IMU fields currently remain zero and are not required for the first navigation stack.
+- battery feedback works;
+- built-in IMU fields remain zero and are not used in the first navigation stack.
 
-See `docs/HARDWARE_VALIDATION.md` for measured results.
+The stock `ugv-app.service` remains disabled during autonomous development because its `app.py` opens the first `/dev/ttyUSB*` and conflicts with the STL-19P.
 
-## Install Ubuntu
-
-Use Raspberry Pi Imager and install Ubuntu Server 24.04 LTS 64-bit onto a separate microSD/SSD. Configure SSH and network access during imaging if convenient.
-
-After first boot verify:
-
-```bash
-cat /etc/os-release
-uname -m
-dpkg --print-architecture
-```
-
-Expected:
+## Files in this repository
 
 ```text
-Ubuntu 24.04 / noble
-aarch64
-arm64
+docker/Dockerfile
+scripts/setup_docker_bookworm.sh
+scripts/build_ros2_docker.sh
+scripts/run_ros2_docker.sh
 ```
 
-## Important Raspberry Pi 5 UART note
+The Docker image contains ROS 2 Jazzy ros-base plus:
 
-Do **not** assume that `/dev/serial0` on the fresh Ubuntu image points to the same GPIO UART as it did on the Waveshare Debian image.
-
-Raspberry Pi 5 has a dedicated debug UART (`UART10`), and UART routing/device aliases can differ from the current Debian setup. The ESP32 is physically connected to GPIO14/GPIO15 (40-pin header), so the fresh Ubuntu installation must be inspected before the base probe is run.
-
-Immediately after first Ubuntu boot collect:
-
-```bash
-ls -l /dev/serial* /dev/ttyAMA* 2>/dev/null || true
-cat /boot/firmware/config.txt | grep -E 'uart|serial' || true
-cat /proc/cmdline
-```
-
-Do not add a Linux serial console to the ESP32 UART: kernel/console output on those GPIO pins would conflict with the Waveshare JSON protocol. Once the fresh-image output is known, configure the Pi 5 GPIO UART explicitly if necessary and then choose a stable project device name for the base.
-
-## Clone the project
-
-```bash
-cd ~
-git clone https://github.com/xander-07/rower_gorod.git
-cd ~/rower_gorod
-```
-
-Do not copy the old global Git setting `http.sslVerify=false` to the new system. A clean Ubuntu installation should have a working CA bundle.
-
-## Install ROS 2 Jazzy and navigation dependencies
-
-The repository contains a guarded installer which refuses to run unless the OS is Ubuntu 24.04 Noble arm64:
-
-```bash
-cd ~/rower_gorod
-chmod +x scripts/setup_ros2_jazzy.sh
-./scripts/setup_ros2_jazzy.sh
-```
-
-It installs:
-
-- ROS 2 Jazzy `ros-base`;
-- ROS development tools and colcon;
-- Navigation2 and `nav2_bringup`;
+- Nav2;
 - SLAM Toolbox;
-- robot_state_publisher and xacro;
+- robot_state_publisher;
+- xacro;
 - TF2 tools;
 - teleop_twist_keyboard;
-- pyserial;
-- project udev rule for `/dev/rower_lidar`.
+- CycloneDDS RMW;
+- pyserial and colcon tools.
 
-After installation, reboot once:
+## Install Docker on the Raspberry Pi
+
+```bash
+cd ~/rower_gorod
+git pull
+chmod +x scripts/setup_docker_bookworm.sh
+./scripts/setup_docker_bookworm.sh
+```
+
+The installer is guarded and only accepts Debian 12 Bookworm arm64.
+
+After it finishes, log out and back in, or reboot:
 
 ```bash
 sudo reboot
 ```
 
-## Post-install verification
+Then verify:
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-
-echo "ROS_DISTRO=$ROS_DISTRO"
-ros2 --help >/dev/null && echo ROS2_OK
-ros2 pkg list | grep -E '^(nav2_bringup|slam_toolbox)$'
-
-ls -l /dev/serial* /dev/ttyAMA* /dev/rower_lidar 2>/dev/null || true
-id
+docker --version
+docker run --rm hello-world
 ```
 
-Then re-run the safe lidar probe:
+## Build the ROS 2 image
+
+```bash
+cd ~/rower_gorod
+chmod +x scripts/build_ros2_docker.sh scripts/run_ros2_docker.sh
+./scripts/build_ros2_docker.sh
+```
+
+The image name is:
+
+```text
+rower-ros2:jazzy
+```
+
+## Start an interactive ROS 2 shell
+
+Make sure the stock Waveshare app is still stopped:
+
+```bash
+systemctl --user is-enabled ugv-app.service || true
+pgrep -af 'ugv_rpi/app.py' || true
+sudo fuser -v /dev/ttyUSB0 || true
+```
+
+Then:
+
+```bash
+cd ~/rower_gorod
+./scripts/run_ros2_docker.sh
+```
+
+The launcher uses host networking for ROS DDS and passes:
+
+```text
+host /dev/ttyAMA0  -> container /dev/ttyAMA0
+host /dev/ttyUSB0  -> container /dev/rower_lidar
+```
+
+It also bind-mounts the repository at:
+
+```text
+/workspace/rower_gorod
+```
+
+Default ROS settings:
+
+```text
+ROS_DOMAIN_ID=42
+RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+```
+
+## Verify inside the container
+
+```bash
+echo "$ROS_DISTRO"
+echo "$RMW_IMPLEMENTATION"
+ros2 --help >/dev/null && echo ROS2_OK
+ros2 pkg list | grep -E '^(nav2_bringup|slam_toolbox)$'
+ls -l /dev/ttyAMA0 /dev/rower_lidar
+```
+
+The existing safe Python hardware probes can also be run inside the container:
 
 ```bash
 python3 scripts/stl19p_probe.py --port /dev/rower_lidar --frames 20
+python3 scripts/ugv_base_probe.py --port /dev/ttyAMA0 --seconds 3
 ```
-
-Run the base probe only after the GPIO14/GPIO15 UART device has been identified on the new image:
-
-```bash
-python3 scripts/ugv_base_probe.py --port <GPIO_UART_DEVICE> --seconds 3
-```
-
-Both hardware probes must pass before creating/starting the ROS driver nodes.
 
 ## Planned ROS graph
-
-First working navigation stack:
 
 ```text
 STL-19P
@@ -134,7 +161,7 @@ STL-19P
   -> /scan
 
 ESP32 UGV02
-  -> T=1001 feedback
+  -> T=1001
   -> rower_base_bridge
   -> /odom
   -> /battery
@@ -148,22 +175,22 @@ TF:
 map -> odom -> base_link -> laser
 
 SLAM Toolbox:
-/scan + TF + /odom -> map
+/scan + /odom + TF -> map
 
 Nav2:
-map + /scan + TF + /odom -> /cmd_vel
+map + /scan + /odom + TF -> /cmd_vel
 ```
 
-The first version will not depend on the built-in IMU because the real robot test produced zero gyro/accelerometer/magnetometer fields even while the chassis was moved by hand.
+The first stack does not depend on the built-in IMU.
 
 ## Next implementation step
 
-Once Ubuntu/Jazzy is verified on the real Raspberry Pi, create the actual ROS 2 packages in this repository:
+After the container passes both hardware probes, create the ROS 2 packages in this repository:
 
-1. `rower_base_bridge` — `/cmd_vel`, `/odom`, battery and serial watchdog;
-2. `rower_lidar` — STL-19P serial parser publishing `sensor_msgs/LaserScan` on `/scan`;
-3. `rower_description` — URDF/xacro and static lidar transform;
-4. `rower_bringup` — launch and configuration;
-5. SLAM Toolbox config;
-6. Nav2 config;
-7. later: sign detector and mission manager for the hackathon logic.
+1. `rower_base_bridge`;
+2. `rower_lidar`;
+3. `rower_description`;
+4. `rower_bringup`;
+5. SLAM Toolbox configuration;
+6. Nav2 configuration;
+7. sign detector and mission manager.
