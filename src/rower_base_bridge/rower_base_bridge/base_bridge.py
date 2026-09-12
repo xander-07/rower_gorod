@@ -12,7 +12,7 @@ from geometry_msgs.msg import TransformStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import BatteryState
-from std_msgs.msg import String
+from std_msgs.msg import Empty, String
 from tf2_ros import TransformBroadcaster
 
 import serial
@@ -27,8 +27,9 @@ class RowerBaseBridge(Node):
     calibrations derived from LiDAR turn tests on the real robot.
 
     Normal requested speed changes are rate-limited in wheel space so starts,
-    stops and direction changes are smoother. The command watchdog and shutdown
-    path deliberately bypass the ramp and stop the base immediately.
+    stops and direction changes are smoother. The command watchdog, explicit
+    emergency-stop topic and shutdown path deliberately bypass the ramp and
+    stop the base immediately.
 
     Motion remains disabled unless ``enable_motion`` is explicitly true.
     """
@@ -168,6 +169,12 @@ class RowerBaseBridge(Node):
         self.battery_pub = self.create_publisher(BatteryState, 'battery', 10)
         self.raw_feedback_pub = self.create_publisher(String, 'base/raw_feedback', 20)
         self.cmd_sub = self.create_subscription(Twist, 'cmd_vel', self._cmd_vel_cb, 10)
+        self.estop_sub = self.create_subscription(
+            Empty,
+            'base/emergency_stop',
+            self._emergency_stop_cb,
+            10,
+        )
         self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
 
         self.ser = serial.Serial(self.serial_port, self.baud, timeout=0)
@@ -231,6 +238,21 @@ class RowerBaseBridge(Node):
                 '-p enable_motion:=true only when you are ready to move the robot.'
             )
             self._motion_warning_sent = True
+
+    def _emergency_stop_cb(self, _msg: Empty) -> None:
+        """Immediately zero the wheels without disabling future commands."""
+        if not self.enable_motion or self._closed:
+            return
+        self._cmd_linear = 0.0
+        self._cmd_angular = 0.0
+        self._last_cmd_time = time.monotonic()
+        self._sent_left = 0.0
+        self._sent_right = 0.0
+        try:
+            self._send_json({'T': 1, 'L': 0.0, 'R': 0.0})
+            self.get_logger().warning('EMERGENCY STOP: wheel commands forced to zero.')
+        except serial.SerialException:
+            pass
 
     def _calibrated_angular_command(self, linear: float, angular: float) -> float:
         """Map desired in-place chassis yaw rate to the raw skid-steer command."""
