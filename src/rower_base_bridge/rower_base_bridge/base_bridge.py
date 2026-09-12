@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from collections import deque
 import json
 import math
 import time
@@ -20,10 +21,12 @@ import serial
 class RowerBaseBridge(Node):
     """Bridge the Waveshare UGV02 JSON UART protocol to ROS 2.
 
-    By default this node is READ-ONLY with respect to drive motion. It sends the
-    safe module-selection command T=4/cmd=0 at startup, but it will not reset the
-    emergency stop and will not send T=1 wheel commands unless enable_motion is
-    explicitly set to true.
+    Drive commands use Waveshare T=1 left/right velocity control. Pose odometry
+    uses the cumulative ``odl`` / ``odr`` counters from T=1001 because the
+    instantaneous L/R feedback is too noisy for long-term pose integration on
+    the real skid-steer chassis.
+
+    Motion remains disabled unless ``enable_motion`` is explicitly true.
     """
 
     def __init__(self) -> None:
@@ -32,6 +35,9 @@ class RowerBaseBridge(Node):
         self.declare_parameter('serial_port', '/dev/rower_base')
         self.declare_parameter('baud', 115200)
         self.declare_parameter('track_width', 0.172)
+        self.declare_parameter('odom_meters_per_count', 0.0104)
+        self.declare_parameter('counter_step_limit', 20.0)
+        self.declare_parameter('twist_window_sec', 0.60)
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('publish_tf', True)
@@ -39,12 +45,19 @@ class RowerBaseBridge(Node):
         self.declare_parameter('command_rate_hz', 10.0)
         self.declare_parameter('cmd_timeout', 0.35)
         self.declare_parameter('max_wheel_speed', 0.25)
-        self.declare_parameter('left_command_scale', 1.0)
-        self.declare_parameter('right_command_scale', 1.0)
+        # Calibrated on the real robot on 2026-09-12. Before correction the
+        # left side accumulated 28 counts while the right accumulated 26 over
+        # the same straight command and the robot curved right. With these
+        # gains the next run produced 28 / 28 and was physically straight.
+        self.declare_parameter('left_command_scale', 0.965)
+        self.declare_parameter('right_command_scale', 1.035)
 
         self.serial_port = str(self.get_parameter('serial_port').value)
         self.baud = int(self.get_parameter('baud').value)
         self.track_width = float(self.get_parameter('track_width').value)
+        self.odom_meters_per_count = float(self.get_parameter('odom_meters_per_count').value)
+        self.counter_step_limit = float(self.get_parameter('counter_step_limit').value)
+        self.twist_window_sec = float(self.get_parameter('twist_window_sec').value)
         self.odom_frame = str(self.get_parameter('odom_frame').value)
         self.base_frame = str(self.get_parameter('base_frame').value)
         self.publish_tf = bool(self.get_parameter('publish_tf').value)
@@ -57,6 +70,12 @@ class RowerBaseBridge(Node):
 
         if self.track_width <= 0.0:
             raise ValueError('track_width must be > 0')
+        if self.odom_meters_per_count <= 0.0:
+            raise ValueError('odom_meters_per_count must be > 0')
+        if self.counter_step_limit <= 0.0:
+            raise ValueError('counter_step_limit must be > 0')
+        if not (0.1 <= self.twist_window_sec <= 2.0):
+            raise ValueError('twist_window_sec must be in 0.1..2.0')
         if self.command_rate_hz <= 0.0:
             raise ValueError('command_rate_hz must be > 0')
         if self.cmd_timeout <= 0.0:
@@ -70,8 +89,6 @@ class RowerBaseBridge(Node):
 
         self.odom_pub = self.create_publisher(Odometry, 'odom', 20)
         self.battery_pub = self.create_publisher(BatteryState, 'battery', 10)
-        # Calibration/debug topic. It republishes the useful numeric fields from
-        # T=1001 as compact JSON without requiring a second process to open UART.
         self.raw_feedback_pub = self.create_publisher(String, 'base/raw_feedback', 20)
         self.cmd_sub = self.create_subscription(Twist, 'cmd_vel', self._cmd_vel_cb, 10)
         self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
@@ -83,7 +100,9 @@ class RowerBaseBridge(Node):
         self._x = 0.0
         self._y = 0.0
         self._yaw = 0.0
-        self._last_feedback_time: Optional[float] = None
+        self._last_counter_left: Optional[float] = None
+        self._last_counter_right: Optional[float] = None
+        self._counter_history = deque()
         self._last_cmd_time: Optional[float] = None
         self._cmd_linear = 0.0
         self._cmd_angular = 0.0
@@ -112,6 +131,7 @@ class RowerBaseBridge(Node):
         self.get_logger().info(
             f'Opened {self.serial_port} at {self.baud} baud; '
             f'track_width={self.track_width:.3f} m; '
+            f'odom_scale={self.odom_meters_per_count:.5f} m/count; '
             f'drive_scales L={self.left_command_scale:.3f} R={self.right_command_scale:.3f}'
         )
 
@@ -143,9 +163,8 @@ class RowerBaseBridge(Node):
             linear = self._cmd_linear
             angular = self._cmd_angular
 
-        # First compute the ideal skid-steer wheel-side commands, then apply
-        # independent calibration gains. This compensates repeatable left/right
-        # drivetrain asymmetry without changing ROS cmd_vel semantics.
+        # First compute ideal skid-steer side velocities, then compensate the
+        # measured left/right drivetrain asymmetry.
         left = (linear - angular * self.track_width / 2.0) * self.left_command_scale
         right = (linear + angular * self.track_width / 2.0) * self.right_command_scale
         left = max(-self.max_wheel_speed, min(self.max_wheel_speed, left))
@@ -175,15 +194,51 @@ class RowerBaseBridge(Node):
             if msg.get('T') == 1001:
                 self._handle_base_feedback(msg)
 
-    def _handle_base_feedback(self, msg: dict) -> None:
+    @staticmethod
+    def _finite_float(value) -> Optional[float]:
         try:
-            left = float(msg.get('L', 0.0))
-            right = float(msg.get('R', 0.0))
+            result = float(value)
         except (TypeError, ValueError):
+            return None
+        return result if math.isfinite(result) else None
+
+    def _counter_twist(self, now_mono: float, odl: float, odr: float) -> tuple[float, float]:
+        """Estimate velocity from a rolling window of cumulative counters.
+
+        The counters are intentionally low-resolution (roughly centimetre-sized
+        increments), so differentiating one sample at a time creates spikes.
+        A rolling window provides a much calmer velocity estimate for Nav2.
+        """
+        self._counter_history.append((now_mono, odl, odr))
+        cutoff = now_mono - self.twist_window_sec
+        while len(self._counter_history) > 2 and self._counter_history[1][0] <= cutoff:
+            self._counter_history.popleft()
+
+        if len(self._counter_history) < 2:
+            return 0.0, 0.0
+
+        t0, odl0, odr0 = self._counter_history[0]
+        dt = now_mono - t0
+        if dt <= 0.05:
+            return 0.0, 0.0
+
+        dl = (odl - odl0) * self.odom_meters_per_count
+        dr = (odr - odr0) * self.odom_meters_per_count
+        linear = (dl + dr) / (2.0 * dt)
+        angular = (dr - dl) / (self.track_width * dt)
+        return linear, angular
+
+    def _handle_base_feedback(self, msg: dict) -> None:
+        left = self._finite_float(msg.get('L'))
+        right = self._finite_float(msg.get('R'))
+        if left is None or right is None:
             return
 
-        # Preserve the controller's cumulative odometer counters for calibration.
-        # We intentionally do not assume a final physical scale here yet.
+        odl = self._finite_float(msg.get('odl'))
+        odr = self._finite_float(msg.get('odr'))
+
+        # Preserve useful raw T=1001 fields for diagnostics/calibration without
+        # allowing a second process to fight the bridge for ownership of UART.
         raw_feedback = {
             'L': left,
             'R': right,
@@ -196,22 +251,45 @@ class RowerBaseBridge(Node):
         self.raw_feedback_pub.publish(raw_msg)
 
         now_mono = time.monotonic()
-        if self._last_feedback_time is not None:
-            dt = now_mono - self._last_feedback_time
-            if 0.0 < dt < 1.0:
-                linear = (left + right) / 2.0
-                angular = (right - left) / self.track_width
-                yaw_mid = self._yaw + angular * dt * 0.5
-                self._x += linear * math.cos(yaw_mid) * dt
-                self._y += linear * math.sin(yaw_mid) * dt
-                self._yaw = math.atan2(
-                    math.sin(self._yaw + angular * dt),
-                    math.cos(self._yaw + angular * dt),
-                )
-        self._last_feedback_time = now_mono
+        linear = 0.0
+        angular = 0.0
 
-        linear = (left + right) / 2.0
-        angular = (right - left) / self.track_width
+        if odl is not None and odr is not None:
+            if self._last_counter_left is not None and self._last_counter_right is not None:
+                dcl = odl - self._last_counter_left
+                dcr = odr - self._last_counter_right
+
+                # A very large one-sample change means the controller probably
+                # reset/restarted or the stream was corrupted. Re-base instead
+                # of teleporting the ROS odometry pose.
+                if abs(dcl) <= self.counter_step_limit and abs(dcr) <= self.counter_step_limit:
+                    dl = dcl * self.odom_meters_per_count
+                    dr = dcr * self.odom_meters_per_count
+                    ds = (dl + dr) / 2.0
+                    dtheta = (dr - dl) / self.track_width
+                    yaw_mid = self._yaw + dtheta * 0.5
+                    self._x += ds * math.cos(yaw_mid)
+                    self._y += ds * math.sin(yaw_mid)
+                    self._yaw = math.atan2(
+                        math.sin(self._yaw + dtheta),
+                        math.cos(self._yaw + dtheta),
+                    )
+                else:
+                    self.get_logger().warning(
+                        f'Ignoring implausible odometer counter jump: '
+                        f'dL={dcl:.1f} dR={dcr:.1f}'
+                    )
+                    self._counter_history.clear()
+
+            self._last_counter_left = odl
+            self._last_counter_right = odr
+            linear, angular = self._counter_twist(now_mono, odl, odr)
+        else:
+            # This fallback should not normally be used on the validated UGV02
+            # firmware, but keeps telemetry available if counters are absent.
+            linear = (left + right) / 2.0
+            angular = (right - left) / self.track_width
+
         stamp = self.get_clock().now().to_msg()
         qz = math.sin(self._yaw / 2.0)
         qw = math.cos(self._yaw / 2.0)
@@ -227,13 +305,13 @@ class RowerBaseBridge(Node):
         odom.twist.twist.linear.x = linear
         odom.twist.twist.angular.z = angular
 
-        # Initial conservative planar covariance; tune after floor calibration.
-        odom.pose.covariance[0] = 0.05
-        odom.pose.covariance[7] = 0.05
-        odom.pose.covariance[35] = 0.20
-        odom.twist.covariance[0] = 0.03
-        odom.twist.covariance[7] = 0.03
-        odom.twist.covariance[35] = 0.10
+        # Conservative planar covariance; refine after turn calibration / SLAM.
+        odom.pose.covariance[0] = 0.03
+        odom.pose.covariance[7] = 0.03
+        odom.pose.covariance[35] = 0.15
+        odom.twist.covariance[0] = 0.04
+        odom.twist.covariance[7] = 0.04
+        odom.twist.covariance[35] = 0.15
         self.odom_pub.publish(odom)
 
         if self.tf_broadcaster is not None:
@@ -292,8 +370,6 @@ def main(args=None) -> None:
     finally:
         node.stop_controller()
         node.destroy_node()
-        # ROS 2's signal handler may already have shut down the default context
-        # after Ctrl+C. Avoid calling shutdown twice, which raises RCLError.
         if rclpy.ok():
             rclpy.shutdown()
 
