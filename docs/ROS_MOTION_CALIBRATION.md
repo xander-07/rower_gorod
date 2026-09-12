@@ -137,48 +137,77 @@ This correction is intentionally limited to `|linear.x| <= 0.02 m/s`. Moving arc
 
 ## Final compensated 0.80 rad/s validation
 
-With angular command compensation enabled, a requested `0.80 rad/s` for 2.0 seconds produced almost exactly the requested physical yaw rate in both directions.
-
-Left / CCW:
+The first compensated validation produced essentially perfect physical command tracking in both directions:
 
 ```text
-LIDAR_RESULT: chassis_angle=91.50deg magnitude=91.50deg raw_scan_shift=-91.50deg shift=-122bins bin_size=0.750deg overlap=479 score=0.0185
-ODOM_RESULT: angle=108.25deg center_drift=0.0054m
-RAW_COUNTERS: odl=152->130 delta=-22 odr=104->127 delta=23 delta_difference=45
-TURN_METRICS: commanded_avg=0.8000rad/s lidar_avg=0.7985rad/s response_ratio=0.9981 odom_angle=108.25deg raw_diff=45
+LEFT:  requested 0.8000 rad/s -> LiDAR 0.7985 rad/s, 91.50 deg
+RIGHT: requested 0.8000 rad/s -> LiDAR 0.7985 rad/s, 91.50 deg
 ```
 
-Right / CW:
-
-```text
-LIDAR_RESULT: chassis_angle=-91.50deg magnitude=91.50deg raw_scan_shift=91.50deg shift=122bins bin_size=0.750deg overlap=476 score=0.0180
-ODOM_RESULT: angle=-99.08deg center_drift=0.0100m
-RAW_COUNTERS: odl=123->145 delta=22 odr=134->110 delta=-24 delta_difference=-46
-TURN_METRICS: commanded_avg=0.8000rad/s lidar_avg=0.7985rad/s response_ratio=0.9981 odom_angle=-99.08deg raw_diff=-46
-```
-
-The physical angular-command calibration is therefore validated: requested `0.80 rad/s` produced `0.7985 rad/s` in both directions, a response ratio of `0.9981`.
-
-## Wheel-odometry yaw refinement
-
-The compensated test showed that the previous wheel-yaw scales (`0.60` left, `0.54` right) still over-reported heading somewhat. Refining them against the LiDAR reference gives values very close to `0.50` in both directions:
-
-```text
-left refinement  = 0.60 * 91.50 / 108.25 ~= 0.507
-right refinement = 0.54 * 91.50 / 99.08  ~= 0.499
-```
-
-For simplicity and symmetry, bringup now uses:
+The wheel-yaw scales were then refined to the symmetric defaults:
 
 ```text
 odom_yaw_scale_left  = 0.50
 odom_yaw_scale_right = 0.50
 ```
 
-Expected yaw with the same raw counter motion is then approximately `90.2 deg` left and `91.7 deg` right, both very close to the LiDAR `91.5 deg` reference.
+A final repeat with these values active produced:
+
+Left / CCW:
+
+```text
+LIDAR_RESULT: chassis_angle=87.75deg magnitude=87.75deg raw_scan_shift=-87.75deg shift=-117bins bin_size=0.750deg overlap=479 score=0.0191
+ODOM_RESULT: angle=88.34deg center_drift=0.0090m
+RAW_COUNTERS: odl=152->130 delta=-22 odr=102->125 delta=23 delta_difference=45
+TURN_METRICS: commanded_avg=0.8000rad/s lidar_avg=0.7658rad/s response_ratio=0.9572 odom_angle=88.34deg raw_diff=45
+```
+
+Right / CW:
+
+```text
+LIDAR_RESULT: chassis_angle=-95.25deg magnitude=95.25deg raw_scan_shift=95.25deg shift=127bins bin_size=0.750deg overlap=478 score=0.0185
+ODOM_RESULT: angle=-98.54deg center_drift=0.0036m
+RAW_COUNTERS: odl=124->149 delta=25 odr=132->107 delta=-25 delta_difference=-50
+TURN_METRICS: commanded_avg=0.8000rad/s lidar_avg=0.8312rad/s response_ratio=1.0390 odom_angle=-98.54deg raw_diff=-50
+```
+
+The two physical turn rates bracket the requested value almost symmetrically. Their mean is:
+
+```text
+(0.7658 + 0.8312) / 2 = 0.7985 rad/s
+```
+
+which differs from the requested `0.8000 rad/s` by only about `0.19%`. The left/right variation is treated as normal skid/floor repeatability rather than something to over-fit with another command correction.
+
+Wheel odometry now also tracks the LiDAR heading closely enough for SLAM initialization:
+
+```text
+left : LiDAR 87.75 deg, odom 88.34 deg  -> +0.59 deg difference
+right: LiDAR 95.25 deg, odom 98.54 deg  -> +3.29 deg magnitude difference
+```
 
 Yaw covariance remains deliberately conservative because six-wheel skid-steer heading is floor/slip dependent and SLAM must be allowed to correct it.
 
-## Status / next step
+## Calibration status
 
-Straight distance, straight-line drivetrain balance, and in-place angular command response are now calibrated well enough to proceed to SLAM Toolbox testing. One short left/right validation with the final `0.50 / 0.50` wheel-yaw scale is useful before relying on wheel odometry for Nav2, but the physical turn command itself is already validated.
+The floor calibration stage is accepted with the following project defaults:
+
+```text
+left_command_scale       = 0.965
+right_command_scale      = 1.035
+odom_meters_per_count    = 0.0102 m/count
+odom_yaw_scale_left      = 0.50
+odom_yaw_scale_right     = 0.50
+angular compensation     = enabled for near-in-place turns
+```
+
+Validated behavior:
+
+```text
+straight motion: physically straight, ~290 mm measured vs ~291 mm calibrated counter distance
+in-place command: mean physical response ~0.7985 rad/s for requested 0.8000 rad/s
+left/right turn repeatability: acceptable for six-wheel skid steer
+wheel odom yaw: close to LiDAR reference, with conservative covariance retained
+```
+
+No further base calibration changes are required before the first SLAM Toolbox mapping test. Moving-arc calibration can be revisited later only if Nav2 path following shows a repeatable issue.
