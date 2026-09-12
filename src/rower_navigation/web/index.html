@@ -165,7 +165,7 @@
         <button id="armBtn" class="arm">УПРАВЛЕНИЕ ЗАБЛОКИРОВАНО</button>
         <div class="small">Кнопка выше — дополнительный предохранитель браузера. Движение всё равно возможно только если ROS запущен с <span class="keys">enable_motion:=true</span>.</div>
 
-        <button id="stopBtn" class="stop">СТОП</button>
+        <button id="stopBtn" class="stop">АВАРИЙНЫЙ СТОП</button>
 
         <div class="pad">
           <button class="forward" data-cmd="forward">↑</button>
@@ -181,7 +181,8 @@
         <input id="angularSpeed" type="range" min="0.15" max="0.40" step="0.05" value="0.25" />
 
         <p class="small">Для чистой карты: прямая → остановка 0.5–1 с → медленный поворот на месте → остановка 0.5–1 с → прямая. Дуги намеренно отключены.</p>
-        <p class="small">Клавиши: <span class="keys">W/↑</span> вперёд, <span class="keys">S/↓</span> назад, <span class="keys">A/←</span> поворот влево, <span class="keys">D/→</span> вправо, <span class="keys">Space</span> стоп.</p>
+        <p class="small">Отпускание клавиши — плавное торможение. <span class="keys">Space</span> или красная кнопка — немедленный аварийный стоп.</p>
+        <p class="small">Клавиши: <span class="keys">W/↑</span> вперёд, <span class="keys">S/↓</span> назад, <span class="keys">A/←</span> поворот влево, <span class="keys">D/→</span> вправо.</p>
       </div>
     </aside>
   </main>
@@ -278,6 +279,7 @@
       ws.onopen = () => {
         setBadge(wsBadge, 'ROS: подключено', 'ok');
         send({ op: 'advertise', topic: '/cmd_vel', type: 'geometry_msgs/msg/Twist' });
+        send({ op: 'advertise', topic: '/base/emergency_stop', type: 'std_msgs/msg/Empty' });
         // Keep the browser useful without making rosbridge mirror every high-rate
         // sample. SLAM itself still receives ROS topics directly.
         subscribe('/map', 1000);
@@ -499,6 +501,14 @@
       publishTwist(0, 0);
     }
 
+    function emergencyStop() {
+      activeCmd = null;
+      zeroHoldUntil = 0;
+      send({ op: 'publish', topic: '/base/emergency_stop', msg: {} });
+      // Also send /cmd_vel zero for compatibility and to keep the desired state zero.
+      publishTwist(0, 0);
+    }
+
     function startMotion(cmd) {
       if (!armed || !ws || ws.readyState !== WebSocket.OPEN) return;
       zeroHoldUntil = 0;
@@ -523,12 +533,12 @@
     }
 
     armBtn.addEventListener('click', () => {
-      if (armed) stopMotion();
+      if (armed) emergencyStop();
       armed = !armed;
       updateArmButton();
     });
 
-    stopBtn.addEventListener('click', () => stopMotion());
+    stopBtn.addEventListener('click', () => emergencyStop());
 
     for (const btn of document.querySelectorAll('.pad button')) {
       const cmd = btn.dataset.cmd;
@@ -549,7 +559,7 @@
       const key = e.key.toLowerCase();
       if (key === ' ' || key === 'spacebar') {
         e.preventDefault();
-        stopMotion();
+        emergencyStop();
         return;
       }
       const cmd = keyToCmd[key];
@@ -566,9 +576,9 @@
       }
     });
 
-    window.addEventListener('blur', stopMotion);
-    window.addEventListener('beforeunload', stopMotion);
-    document.addEventListener('visibilitychange', () => { if (document.hidden) stopMotion(); });
+    window.addEventListener('blur', emergencyStop);
+    window.addEventListener('beforeunload', emergencyStop);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) emergencyStop(); });
 
     linearSpeed.addEventListener('input', () => linearValue.textContent = Number(linearSpeed.value).toFixed(2));
     angularSpeed.addEventListener('input', () => angularValue.textContent = Number(angularSpeed.value).toFixed(2));
