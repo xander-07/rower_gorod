@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rower — SLAM карта</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif;
+      --bg: #101419;
+      --panel: #171d24;
+      --line: #2a333d;
+      --text: #eef3f7;
+      --muted: #9eabb7;
+      --ok: #4fd18b;
+      --warn: #ffca5c;
+      --danger: #ff6b6b;
+      --accent: #62a8ff;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; background: var(--bg); color: var(--text); overflow: hidden; }
+    body { display: grid; grid-template-rows: auto 1fr; }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 14px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+      flex-wrap: wrap;
+    }
+
+    h1 { font-size: 17px; margin: 0 8px 0 0; }
+    .badge {
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: #222a33;
+      color: var(--muted);
+      border: 1px solid var(--line);
+    }
+    .badge.ok { color: var(--ok); border-color: #2f6a4d; }
+    .badge.warn { color: var(--warn); border-color: #6a5730; }
+
+    main {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 280px;
+    }
+
+    #mapWrap { position: relative; min-width: 0; min-height: 0; background: #0c0f13; }
+    #mapCanvas { width: 100%; height: 100%; display: block; }
+    #mapHint {
+      position: absolute;
+      left: 14px;
+      bottom: 12px;
+      padding: 7px 10px;
+      background: rgba(16, 20, 25, .82);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      pointer-events: none;
+    }
+
+    aside {
+      background: var(--panel);
+      border-left: 1px solid var(--line);
+      padding: 14px;
+      overflow: auto;
+    }
+
+    .section { margin-bottom: 18px; }
+    .section h2 { font-size: 13px; margin: 0 0 10px; color: #cbd5dd; text-transform: uppercase; letter-spacing: .05em; }
+    .row { display: flex; justify-content: space-between; gap: 12px; margin: 7px 0; font-size: 13px; }
+    .row span:first-child { color: var(--muted); }
+
+    .arm {
+      width: 100%;
+      border: 1px solid #6b3434;
+      background: #2a1b1b;
+      color: #ffb9b9;
+      border-radius: 9px;
+      padding: 10px;
+      font-weight: 700;
+      cursor: pointer;
+      margin-bottom: 10px;
+    }
+    .arm.on { border-color: #286c49; background: #162b21; color: #8df0b9; }
+
+    .stop {
+      width: 100%;
+      border: 0;
+      border-radius: 9px;
+      background: #b83a3a;
+      color: white;
+      padding: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      margin: 10px 0 12px;
+    }
+
+    .pad {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      user-select: none;
+      touch-action: none;
+    }
+    .pad button {
+      min-height: 54px;
+      border-radius: 9px;
+      border: 1px solid #37424d;
+      background: #222a33;
+      color: white;
+      font-size: 18px;
+      cursor: pointer;
+    }
+    .pad button:active { background: #334252; }
+    .pad .forward { grid-column: 2; }
+    .pad .left { grid-column: 1; grid-row: 2; }
+    .pad .back { grid-column: 2; grid-row: 2; }
+    .pad .right { grid-column: 3; grid-row: 2; }
+
+    label { display: block; font-size: 12px; color: var(--muted); margin: 11px 0 5px; }
+    input[type="range"] { width: 100%; }
+    .small { font-size: 12px; line-height: 1.45; color: var(--muted); }
+    .keys { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: #dfe8ef; }
+
+    @media (max-width: 820px) {
+      main { grid-template-columns: 1fr; grid-template-rows: minmax(340px, 1fr) auto; }
+      aside { border-left: 0; border-top: 1px solid var(--line); max-height: 45vh; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Rower — SLAM</h1>
+    <span id="wsBadge" class="badge warn">ROS: подключение…</span>
+    <span id="mapBadge" class="badge">карта: нет</span>
+    <span id="tfBadge" class="badge">TF: нет</span>
+    <span id="hostBadge" class="badge"></span>
+  </header>
+
+  <main>
+    <div id="mapWrap">
+      <canvas id="mapCanvas"></canvas>
+      <div id="mapHint">Белое — свободно, чёрное — препятствие, синее — LiDAR, стрелка — робот</div>
+    </div>
+
+    <aside>
+      <div class="section">
+        <h2>Состояние</h2>
+        <div class="row"><span>Карта</span><strong id="mapInfo">ожидание</strong></div>
+        <div class="row"><span>Позиция</span><strong id="poseInfo">—</strong></div>
+        <div class="row"><span>LiDAR</span><strong id="scanInfo">—</strong></div>
+        <div class="row"><span>Батарея</span><strong id="batteryInfo">—</strong></div>
+      </div>
+
+      <div class="section">
+        <h2>Ручное управление</h2>
+        <button id="armBtn" class="arm">УПРАВЛЕНИЕ ЗАБЛОКИРОВАНО</button>
+        <div class="small">Кнопка выше — дополнительный предохранитель браузера. Движение всё равно возможно только если ROS запущен с <span class="keys">enable_motion:=true</span>.</div>
+
+        <button id="stopBtn" class="stop">СТОП</button>
+
+        <div class="pad">
+          <button class="forward" data-cmd="forward">↑</button>
+          <button class="left" data-cmd="left">↶</button>
+          <button class="back" data-cmd="back">↓</button>
+          <button class="right" data-cmd="right">↷</button>
+        </div>
+
+        <label>Линейная скорость: <strong id="linearValue">0.06</strong> м/с</label>
+        <input id="linearSpeed" type="range" min="0.03" max="0.08" step="0.01" value="0.06" />
+
+        <label>Угловая скорость: <strong id="angularValue">0.40</strong> рад/с</label>
+        <input id="angularSpeed" type="range" min="0.20" max="0.80" step="0.05" value="0.40" />
+
+        <p class="small">Клавиши: <span class="keys">W/↑</span> вперёд, <span class="keys">S/↓</span> назад, <span class="keys">A/←</span> поворот на месте влево, <span class="keys">D/→</span> вправо, <span class="keys">Space</span> стоп. Дуги намеренно отключены.</p>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    'use strict';
+
+    const canvas = document.getElementById('mapCanvas');
+    const ctx = canvas.getContext('2d');
+    const wsBadge = document.getElementById('wsBadge');
+    const mapBadge = document.getElementById('mapBadge');
+    const tfBadge = document.getElementById('tfBadge');
+    const hostBadge = document.getElementById('hostBadge');
+    const mapInfo = document.getElementById('mapInfo');
+    const poseInfo = document.getElementById('poseInfo');
+    const scanInfo = document.getElementById('scanInfo');
+    const batteryInfo = document.getElementById('batteryInfo');
+    const armBtn = document.getElementById('armBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const linearSpeed = document.getElementById('linearSpeed');
+    const angularSpeed = document.getElementById('angularSpeed');
+    const linearValue = document.getElementById('linearValue');
+    const angularValue = document.getElementById('angularValue');
+
+    hostBadge.textContent = `robot: ${location.hostname}`;
+
+    let ws = null;
+    let reconnectTimer = null;
+    let mapMsg = null;
+    let mapImage = null;
+    let odomPose = null;
+    let mapToOdom = null;
+    let scanMsg = null;
+    let batteryVoltage = null;
+    let armed = false;
+    let activeCmd = null;
+
+    // Validated URDF fallback. /tf_static replaces this as soon as it arrives.
+    let baseToLaser = { x: 0.040, y: 0.0, yaw: Math.PI / 2 };
+
+    function normFrame(name) {
+      return String(name || '').replace(/^\/+/, '');
+    }
+
+    function yawFromQuaternion(q) {
+      if (!q) return 0;
+      const siny = 2 * ((q.w || 0) * (q.z || 0) + (q.x || 0) * (q.y || 0));
+      const cosy = 1 - 2 * ((q.y || 0) ** 2 + (q.z || 0) ** 2);
+      return Math.atan2(siny, cosy);
+    }
+
+    function tfTo2D(t) {
+      return {
+        x: Number(t.translation?.x || 0),
+        y: Number(t.translation?.y || 0),
+        yaw: yawFromQuaternion(t.rotation || {})
+      };
+    }
+
+    function compose(a, b) {
+      const c = Math.cos(a.yaw), s = Math.sin(a.yaw);
+      return {
+        x: a.x + c * b.x - s * b.y,
+        y: a.y + s * b.x + c * b.y,
+        yaw: a.yaw + b.yaw
+      };
+    }
+
+    function robotMapPose() {
+      if (!odomPose) return null;
+      return compose(mapToOdom || { x: 0, y: 0, yaw: 0 }, odomPose);
+    }
+
+    function setBadge(el, text, state) {
+      el.textContent = text;
+      el.className = `badge ${state || ''}`.trim();
+    }
+
+    function subscribe(topic, throttle = 0) {
+      send({ op: 'subscribe', topic, throttle_rate: throttle, queue_length: 1 });
+    }
+
+    function send(obj) {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+    }
+
+    function connect() {
+      clearTimeout(reconnectTimer);
+      setBadge(wsBadge, 'ROS: подключение…', 'warn');
+      const url = `ws://${location.hostname}:9090`;
+      ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        setBadge(wsBadge, 'ROS: подключено', 'ok');
+        send({ op: 'advertise', topic: '/cmd_vel', type: 'geometry_msgs/msg/Twist' });
+        subscribe('/map', 500);
+        subscribe('/odom', 50);
+        subscribe('/scan', 100);
+        subscribe('/tf', 100);
+        subscribe('/tf_static', 0);
+        subscribe('/battery', 500);
+      };
+
+      ws.onmessage = (event) => {
+        let packet;
+        try { packet = JSON.parse(event.data); } catch (_) { return; }
+        if (packet.op !== 'publish') return;
+        const msg = packet.msg;
+
+        if (packet.topic === '/map') {
+          mapMsg = msg;
+          rebuildMapImage();
+          setBadge(mapBadge, 'карта: online', 'ok');
+        } else if (packet.topic === '/odom') {
+          const p = msg.pose?.pose;
+          if (p) odomPose = { x: Number(p.position.x), y: Number(p.position.y), yaw: yawFromQuaternion(p.orientation) };
+        } else if (packet.topic === '/scan') {
+          scanMsg = msg;
+          const valid = Array.isArray(msg.ranges) ? msg.ranges.filter(Number.isFinite).length : 0;
+          scanInfo.textContent = `${valid} точек`;
+        } else if (packet.topic === '/tf' || packet.topic === '/tf_static') {
+          handleTf(msg);
+        } else if (packet.topic === '/battery') {
+          const v = Number(msg.voltage);
+          if (Number.isFinite(v)) batteryVoltage = v;
+        }
+      };
+
+      ws.onclose = () => {
+        setBadge(wsBadge, 'ROS: отключено', 'warn');
+        armed = false;
+        activeCmd = null;
+        updateArmButton();
+        reconnectTimer = setTimeout(connect, 2000);
+      };
+
+      ws.onerror = () => ws.close();
+    }
+
+    function handleTf(msg) {
+      if (!Array.isArray(msg.transforms)) return;
+      for (const t of msg.transforms) {
+        const parent = normFrame(t.header?.frame_id);
+        const child = normFrame(t.child_frame_id);
+        if (parent === 'map' && child === 'odom') {
+          mapToOdom = tfTo2D(t.transform);
+          setBadge(tfBadge, 'TF: map→odom', 'ok');
+        }
+        if (parent === 'base_link' && child === 'laser') {
+          baseToLaser = tfTo2D(t.transform);
+        }
+      }
+    }
+
+    function rebuildMapImage() {
+      if (!mapMsg?.info || !Array.isArray(mapMsg.data)) return;
+      const w = Number(mapMsg.info.width), h = Number(mapMsg.info.height);
+      if (!w || !h || mapMsg.data.length < w * h) return;
+
+      const off = document.createElement('canvas');
+      off.width = w;
+      off.height = h;
+      const octx = off.getContext('2d');
+      const image = octx.createImageData(w, h);
+
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const src = y * w + x;
+          const dstY = h - 1 - y;
+          const dst = (dstY * w + x) * 4;
+          const occ = Number(mapMsg.data[src]);
+          let c;
+          if (occ < 0) c = 72;
+          else if (occ <= 5) c = 245;
+          else c = Math.max(12, 245 - Math.round(occ * 2.3));
+          image.data[dst] = c;
+          image.data[dst + 1] = c;
+          image.data[dst + 2] = c;
+          image.data[dst + 3] = 255;
+        }
+      }
+      octx.putImageData(image, 0, 0);
+      mapImage = off;
+
+      const res = Number(mapMsg.info.resolution);
+      mapInfo.textContent = `${(w * res).toFixed(2)} × ${(h * res).toFixed(2)} м · ${(res * 100).toFixed(1)} см/px`;
+    }
+
+    function worldView() {
+      if (!mapMsg?.info) return null;
+      const res = Number(mapMsg.info.resolution);
+      const origin = mapMsg.info.origin?.position || { x: 0, y: 0 };
+      return {
+        ox: Number(origin.x), oy: Number(origin.y),
+        widthM: Number(mapMsg.info.width) * res,
+        heightM: Number(mapMsg.info.height) * res
+      };
+    }
+
+    function render() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const targetW = Math.max(1, Math.round(rect.width * dpr));
+      const targetH = Math.max(1, Math.round(rect.height * dpr));
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const W = rect.width, H = rect.height;
+      ctx.fillStyle = '#0c0f13';
+      ctx.fillRect(0, 0, W, H);
+
+      const view = worldView();
+      if (!view || !mapImage) {
+        ctx.fillStyle = '#9eabb7';
+        ctx.font = '15px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText('Ожидание /map…', W / 2, H / 2);
+        requestAnimationFrame(render);
+        return;
+      }
+
+      const pad = 26;
+      const scale = Math.max(1, Math.min((W - pad * 2) / view.widthM, (H - pad * 2) / view.heightM));
+      const drawW = view.widthM * scale;
+      const drawH = view.heightM * scale;
+      const left = (W - drawW) / 2;
+      const top = (H - drawH) / 2;
+
+      const toCanvas = (x, y) => ({
+        x: left + (x - view.ox) * scale,
+        y: top + drawH - (y - view.oy) * scale
+      });
+
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(mapImage, left, top, drawW, drawH);
+      ctx.strokeStyle = '#46515d';
+      ctx.strokeRect(left, top, drawW, drawH);
+
+      const robot = robotMapPose();
+      if (robot) {
+        // Current LiDAR points transformed through base_link into map.
+        if (scanMsg && Array.isArray(scanMsg.ranges)) {
+          const laser = compose(robot, baseToLaser);
+          ctx.fillStyle = '#2c8fff';
+          const amin = Number(scanMsg.angle_min || 0);
+          const ainc = Number(scanMsg.angle_increment || 0);
+          const rmin = Number(scanMsg.range_min || 0.05);
+          const rmax = Number(scanMsg.range_max || 20);
+          for (let i = 0; i < scanMsg.ranges.length; i += 2) {
+            const r = Number(scanMsg.ranges[i]);
+            if (!Number.isFinite(r) || r < rmin || r > rmax) continue;
+            const a = laser.yaw + amin + i * ainc;
+            const p = toCanvas(laser.x + Math.cos(a) * r, laser.y + Math.sin(a) * r);
+            if (p.x < 0 || p.y < 0 || p.x > W || p.y > H) continue;
+            ctx.fillRect(p.x - 1, p.y - 1, 2, 2);
+          }
+        }
+
+        const p = toCanvas(robot.x, robot.y);
+        const arrowLen = 0.18 * scale;
+        const q = toCanvas(robot.x + Math.cos(robot.yaw) * 0.18, robot.y + Math.sin(robot.yaw) * 0.18);
+        ctx.strokeStyle = '#ff5e62';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, Math.max(5, 0.07 * scale), 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(q.x, q.y);
+        ctx.stroke();
+        ctx.fillStyle = '#ff5e62';
+        ctx.beginPath();
+        ctx.arc(q.x, q.y, 3, 0, Math.PI * 2);
+        ctx.fill();
+
+        poseInfo.textContent = `${robot.x.toFixed(2)}, ${robot.y.toFixed(2)} м · ${(robot.yaw * 180 / Math.PI).toFixed(1)}°`;
+      }
+
+      batteryInfo.textContent = batteryVoltage == null ? '—' : `${batteryVoltage.toFixed(2)} В`;
+      requestAnimationFrame(render);
+    }
+
+    function twistFor(cmd) {
+      const lin = Number(linearSpeed.value);
+      const ang = Number(angularSpeed.value);
+      if (cmd === 'forward') return { linear: lin, angular: 0 };
+      if (cmd === 'back') return { linear: -lin, angular: 0 };
+      if (cmd === 'left') return { linear: 0, angular: ang };
+      if (cmd === 'right') return { linear: 0, angular: -ang };
+      return { linear: 0, angular: 0 };
+    }
+
+    function publishTwist(linear, angular) {
+      send({
+        op: 'publish',
+        topic: '/cmd_vel',
+        msg: {
+          linear: { x: linear, y: 0, z: 0 },
+          angular: { x: 0, y: 0, z: angular }
+        }
+      });
+    }
+
+    function stopMotion() {
+      activeCmd = null;
+      publishTwist(0, 0);
+      setTimeout(() => publishTwist(0, 0), 80);
+    }
+
+    function startMotion(cmd) {
+      if (!armed || !ws || ws.readyState !== WebSocket.OPEN) return;
+      activeCmd = cmd;
+      const t = twistFor(cmd);
+      publishTwist(t.linear, t.angular);
+    }
+
+    setInterval(() => {
+      if (!armed || !activeCmd || !ws || ws.readyState !== WebSocket.OPEN) return;
+      const t = twistFor(activeCmd);
+      publishTwist(t.linear, t.angular);
+    }, 100);
+
+    function updateArmButton() {
+      armBtn.classList.toggle('on', armed);
+      armBtn.textContent = armed ? 'УПРАВЛЕНИЕ РАЗРЕШЕНО' : 'УПРАВЛЕНИЕ ЗАБЛОКИРОВАНО';
+    }
+
+    armBtn.addEventListener('click', () => {
+      if (armed) stopMotion();
+      armed = !armed;
+      updateArmButton();
+    });
+
+    stopBtn.addEventListener('click', () => stopMotion());
+
+    for (const btn of document.querySelectorAll('.pad button')) {
+      const cmd = btn.dataset.cmd;
+      btn.addEventListener('pointerdown', (e) => { e.preventDefault(); btn.setPointerCapture?.(e.pointerId); startMotion(cmd); });
+      btn.addEventListener('pointerup', (e) => { e.preventDefault(); stopMotion(); });
+      btn.addEventListener('pointercancel', stopMotion);
+      btn.addEventListener('contextmenu', (e) => e.preventDefault());
+    }
+
+    const keyToCmd = {
+      w: 'forward', arrowup: 'forward',
+      s: 'back', arrowdown: 'back',
+      a: 'left', arrowleft: 'left',
+      d: 'right', arrowright: 'right'
+    };
+
+    window.addEventListener('keydown', (e) => {
+      const key = e.key.toLowerCase();
+      if (key === ' ' || key === 'spacebar') {
+        e.preventDefault();
+        stopMotion();
+        return;
+      }
+      const cmd = keyToCmd[key];
+      if (!cmd || e.repeat) return;
+      e.preventDefault();
+      startMotion(cmd);
+    });
+
+    window.addEventListener('keyup', (e) => {
+      const cmd = keyToCmd[e.key.toLowerCase()];
+      if (cmd && activeCmd === cmd) {
+        e.preventDefault();
+        stopMotion();
+      }
+    });
+
+    window.addEventListener('blur', stopMotion);
+    window.addEventListener('beforeunload', stopMotion);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) stopMotion(); });
+
+    linearSpeed.addEventListener('input', () => linearValue.textContent = Number(linearSpeed.value).toFixed(2));
+    angularSpeed.addEventListener('input', () => angularValue.textContent = Number(angularSpeed.value).toFixed(2));
+
+    updateArmButton();
+    connect();
+    requestAnimationFrame(render);
+  </script>
+</body>
+</html>
