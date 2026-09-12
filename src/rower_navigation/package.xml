@@ -14,6 +14,7 @@
   <exec_depend>rower_bringup</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>foxglove_bridge</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
