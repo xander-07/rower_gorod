@@ -38,18 +38,65 @@ This proves the complete software/firmware/encoder loop. It is **not** an odomet
 
 Do not tune `track_width`, wheel scale, or Nav2 parameters from the lifted-wheel numbers.
 
-## Next calibration: slow straight run on the floor
+## First straight floor run — 2026-09-12
 
-Use `scripts/ros_floor_straight_probe.py`. The default command is deliberately conservative:
+The robot was placed on the floor and commanded:
 
 ```text
-speed: 0.06 m/s
-duration: 1.5 s
-nominal commanded travel: 0.09 m
+linear.x = 0.06 m/s
+angular.z = 0
+duration = 1.5 s
+nominal commanded travel = 0.09 m
 ```
 
-The test requires `--run`, waits three seconds before motion, repeatedly publishes zero before and after the test, and limits speed to at most 0.10 m/s and duration to at most 2.0 s.
+Observed ROS result:
 
-Run only on a clear, flat floor with at least 1 m of free space in front of the robot. Mark the robot center before and after the run and measure the real displacement in millimetres. Also note whether the chassis visibly pulls left or right.
+```text
+SUMMARY: odom_samples=28 dx=0.0752m dy=-0.0083m odom_distance=0.0756m dyaw=-12.69deg max|linear.x|=0.3802m/s max|angular.z|=2.2206rad/s
+```
 
-The first floor test is intended to compare physical travel with encoder-derived `/odom` and to check straightness. Effective skid-steer track width should only be calibrated after straight-line scale/sign behavior is understood.
+Physical observation:
+
+```text
+travel: approximately 90 mm
+straightness: confidently straight, no visible pull left/right
+```
+
+This is important: physical travel agrees well with the commanded 90 mm, but the current ROS pose integration reports only 75.6 mm and a false yaw change of about -12.7 degrees even though the chassis visibly drove straight. Therefore the command path is behaving well, while pose integration from instantaneous `L/R` speed samples is not yet trustworthy enough for SLAM/Nav2.
+
+The approximate one-run distance ratio is:
+
+```text
+physical / ROS = 0.090 / 0.0756 ~= 1.19
+```
+
+This is only a provisional observation because the physical measurement was approximate and the run was short. Do not hard-code this scale yet.
+
+## Next diagnostic: cumulative wheel odometer counters
+
+The Waveshare `T=1001` feedback also carries cumulative `odl` and `odr` counters. These are potentially much better for pose integration than numerically integrating the noisy instantaneous `L/R` speed samples.
+
+`rower_base_bridge` now republishes the useful raw T=1001 fields on:
+
+```text
+/base/raw_feedback
+```
+
+as compact JSON containing:
+
+```text
+L, R, odl, odr, v
+```
+
+`scripts/ros_floor_straight_probe.py` now captures the start/end `odl/odr` counters and prints a `RAW_COUNTERS` line. The next straight run should be somewhat longer to reduce measurement uncertainty, while remaining slow and safe. Recommended command:
+
+```bash
+python3 scripts/ros_floor_straight_probe.py \
+  --run \
+  --speed 0.06 \
+  --seconds 3.0
+```
+
+Nominal travel is about 0.18 m. Measure the real center-to-center travel in millimetres and report whether the robot remained straight. Compare that physical distance to both raw counter deltas before changing the odometry implementation.
+
+Only after straight-line scale is understood should effective skid-steer track width / turning odometry be calibrated.
