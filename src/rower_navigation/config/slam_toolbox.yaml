@@ -17,15 +17,20 @@ slam_toolbox:
     ceres_dogleg_type: TRADITIONAL_DOGLEG
     ceres_loss_function: None
 
-    # Small 4 x 4 m arena: keep enough detail without overloading the Pi.
+    # Compact arena. Keep useful detail, but leave CPU headroom for the base,
+    # LiDAR and local browser dashboard on Raspberry Pi 4.
     resolution: 0.025
     max_laser_range: 8.0
     minimum_time_interval: 0.20
-    transform_publish_period: 0.02
-    map_update_interval: 1.0
-    transform_timeout: 0.20
+    transform_publish_period: 0.05
+    map_update_interval: 2.0
+    transform_timeout: 0.50
     tf_buffer_duration: 30.0
-    throttle_scans: 1
+
+    # STL-19P publishes about 10 Hz. Processing every second scan (~5 Hz) is
+    # sufficient at our low mapping speeds and prevents the SLAM message-filter
+    # queue from being saturated on the Pi.
+    throttle_scans: 2
     stack_size_to_use: 40000000
     enable_interactive_mode: true
 
@@ -34,7 +39,7 @@ slam_toolbox:
     use_scan_barycenter: true
     minimum_travel_distance: 0.03
     minimum_travel_heading: 0.03
-    scan_buffer_size: 20
+    scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 5.0
     link_match_minimum_response_fine: 0.10
     link_scan_maximum_distance: 1.0
