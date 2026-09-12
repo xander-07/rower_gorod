@@ -218,6 +218,7 @@
     let batteryVoltage = null;
     let armed = false;
     let activeCmd = null;
+    let zeroHoldUntil = 0;
 
     // Validated URDF fallback. /tf_static replaces this as soon as it arrives.
     let baseToLaser = { x: 0.040, y: 0.0, yaw: Math.PI / 2 };
@@ -316,6 +317,7 @@
         setBadge(wsBadge, 'ROS: отключено', 'warn');
         armed = false;
         activeCmd = null;
+        zeroHoldUntil = 0;
         updateArmButton();
         reconnectTimer = setTimeout(connect, 2000);
       };
@@ -491,21 +493,28 @@
 
     function stopMotion() {
       activeCmd = null;
+      // Keep publishing zero briefly so the base bridge can perform its normal
+      // smooth deceleration instead of reaching the command watchdog timeout.
+      zeroHoldUntil = performance.now() + 800;
       publishTwist(0, 0);
-      setTimeout(() => publishTwist(0, 0), 80);
     }
 
     function startMotion(cmd) {
       if (!armed || !ws || ws.readyState !== WebSocket.OPEN) return;
+      zeroHoldUntil = 0;
       activeCmd = cmd;
       const t = twistFor(cmd);
       publishTwist(t.linear, t.angular);
     }
 
     setInterval(() => {
-      if (!armed || !activeCmd || !ws || ws.readyState !== WebSocket.OPEN) return;
-      const t = twistFor(activeCmd);
-      publishTwist(t.linear, t.angular);
+      if (!armed || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (activeCmd) {
+        const t = twistFor(activeCmd);
+        publishTwist(t.linear, t.angular);
+      } else if (performance.now() < zeroHoldUntil) {
+        publishTwist(0, 0);
+      }
     }, 100);
 
     function updateArmButton() {
