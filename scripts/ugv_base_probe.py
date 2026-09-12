@@ -58,13 +58,20 @@ def main() -> int:
                 msg_type = msg.get("T")
                 if msg_type == 1001:
                     base_feedback += 1
+                    v_raw = msg.get("v")
+                    try:
+                        voltage = float(v_raw) / 100.0
+                        voltage_text = f"{voltage:.2f}V(raw={v_raw})"
+                    except (TypeError, ValueError):
+                        voltage_text = str(v_raw)
+
                     print(
                         "BASE "
                         f"L={msg.get('L')} R={msg.get('R')} "
                         f"odl={msg.get('odl')} odr={msg.get('odr')} "
-                        f"v={msg.get('v')} "
+                        f"v={voltage_text} "
                         f"gyro=({msg.get('gx')},{msg.get('gy')},{msg.get('gz')}) "
-                        f"acc=({msg.get('ax')},{msg.get('ay')},{msg.get('az')})"
+                        f"imu/aux=({msg.get('ax')},{msg.get('ay')},{msg.get('az')})"
                     )
                 else:
                     other_json += 1
