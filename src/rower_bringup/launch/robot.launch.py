@@ -18,6 +18,8 @@ def generate_launch_description():
     enable_motion = LaunchConfiguration('enable_motion')
     left_command_scale = LaunchConfiguration('left_command_scale')
     right_command_scale = LaunchConfiguration('right_command_scale')
+    odom_meters_per_count = LaunchConfiguration('odom_meters_per_count')
+    track_width = LaunchConfiguration('track_width')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -27,13 +29,23 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'left_command_scale',
-            default_value='1.0',
-            description='Multiplicative calibration gain for the left drive side.',
+            default_value='0.965',
+            description='Calibrated multiplicative gain for the left drive side.',
         ),
         DeclareLaunchArgument(
             'right_command_scale',
-            default_value='1.0',
-            description='Multiplicative calibration gain for the right drive side.',
+            default_value='1.035',
+            description='Calibrated multiplicative gain for the right drive side.',
+        ),
+        DeclareLaunchArgument(
+            'odom_meters_per_count',
+            default_value='0.0104',
+            description='Initial physical scale for cumulative odl/odr counters.',
+        ),
+        DeclareLaunchArgument(
+            'track_width',
+            default_value='0.172',
+            description='Current skid-steer track width used by odometry; turn calibration is next.',
         ),
         Node(
             package='robot_state_publisher',
@@ -64,6 +76,8 @@ def generate_launch_description():
                 'enable_motion': ParameterValue(enable_motion, value_type=bool),
                 'left_command_scale': ParameterValue(left_command_scale, value_type=float),
                 'right_command_scale': ParameterValue(right_command_scale, value_type=float),
+                'odom_meters_per_count': ParameterValue(odom_meters_per_count, value_type=float),
+                'track_width': ParameterValue(track_width, value_type=float),
             }],
         ),
     ])
