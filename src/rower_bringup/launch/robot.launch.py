@@ -20,6 +20,8 @@ def generate_launch_description():
     right_command_scale = LaunchConfiguration('right_command_scale')
     odom_meters_per_count = LaunchConfiguration('odom_meters_per_count')
     track_width = LaunchConfiguration('track_width')
+    odom_yaw_scale_left = LaunchConfiguration('odom_yaw_scale_left')
+    odom_yaw_scale_right = LaunchConfiguration('odom_yaw_scale_right')
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -45,7 +47,17 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'track_width',
             default_value='0.172',
-            description='Current skid-steer effective track width used by odometry; turn calibration is next.',
+            description='Geometric skid-steer track width used in the raw counter yaw model.',
+        ),
+        DeclareLaunchArgument(
+            'odom_yaw_scale_left',
+            default_value='0.50',
+            description='LiDAR-calibrated scale for left/CCW wheel-counter yaw.',
+        ),
+        DeclareLaunchArgument(
+            'odom_yaw_scale_right',
+            default_value='0.50',
+            description='LiDAR-calibrated scale for right/CW wheel-counter yaw.',
         ),
         Node(
             package='robot_state_publisher',
@@ -78,6 +90,8 @@ def generate_launch_description():
                 'right_command_scale': ParameterValue(right_command_scale, value_type=float),
                 'odom_meters_per_count': ParameterValue(odom_meters_per_count, value_type=float),
                 'track_width': ParameterValue(track_width, value_type=float),
+                'odom_yaw_scale_left': ParameterValue(odom_yaw_scale_left, value_type=float),
+                'odom_yaw_scale_right': ParameterValue(odom_yaw_scale_right, value_type=float),
             }],
         ),
     ])
