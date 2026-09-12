@@ -48,7 +48,7 @@ because `28.5 * 0.0102 = 0.2907 m`, closely matching the measured ~0.290 m.
 
 Early visual turn estimates were too coarse. The STL-19P scan-matching probe was corrected to search both circular-shift directions, and its result was then confirmed by direct physical observation. The LiDAR result is therefore used as the turn-calibration reference.
 
-### 0.80 rad/s command, 2.0 s
+### 0.80 rad/s raw command, 2.0 s
 
 Left / CCW:
 
@@ -62,9 +62,9 @@ Right / CW:
 LIDAR_RESULT: chassis_angle=-24.00deg magnitude=24.00deg raw_scan_shift=24.00deg shift=32bins bin_size=0.750deg overlap=478 score=0.0048
 ```
 
-Real average angular speed is about `0.206 rad/s` for a requested `0.80 rad/s`.
+Real average angular speed is about `0.206 rad/s` for a requested `0.80 rad/s` before compensation.
 
-### 1.60 rad/s command, 2.0 s
+### 1.60 rad/s raw command, 2.0 s
 
 Left / CCW:
 
@@ -86,7 +86,7 @@ TURN_METRICS: commanded_avg=1.6000rad/s lidar_avg=0.5956rad/s response_ratio=0.3
 
 Real average angular speed is about `0.592 rad/s` for a requested `1.60 rad/s`.
 
-### 2.00 rad/s command, 2.0 s
+### 2.00 rad/s raw command, 2.0 s
 
 Left / CCW:
 
@@ -106,25 +106,18 @@ RAW_COUNTERS: odl=124->147 delta=23 odr=134->109 delta=-25 delta_difference=-48
 TURN_METRICS: commanded_avg=2.0000rad/s lidar_avg=0.7461rad/s response_ratio=0.3731 odom_angle=173.12deg raw_diff=-48
 ```
 
-These results were physically confirmed: the chassis really turns about `89 deg` left and `85.5 deg` right, not the roughly `173 deg` reported by the old wheel-yaw model.
-
-The chassis itself is therefore acceptably symmetric left/right. The main issues are:
-
-```text
-1. requested angular.z is much larger than the physical yaw rate at low speed;
-2. wheel-counter yaw substantially over-reports real chassis yaw during skid turns.
-```
+These results were physically confirmed: the chassis really turns about `89 deg` left and `85.5 deg` right, not the roughly `173 deg` reported by the uncorrected wheel-yaw model.
 
 ## Angular command compensation
 
-Separate affine fits from the three measured operating points give approximately:
+Separate affine fits from the measured operating points give approximately:
 
 ```text
 left : omega_real ~= 0.4804 * omega_raw - 0.1810
 right: omega_real ~= 0.4523 * omega_raw - 0.1463
 ```
 
-The bridge now applies the inverse relationship for near-in-place turns:
+The bridge applies the inverse relationship for near-in-place turns:
 
 ```text
 left raw magnitude  ~= 2.0817 * desired_omega + 0.3767
@@ -140,36 +133,52 @@ angular_command_deadband = 0.03 rad/s
 angular_command_max_raw = 2.50 rad/s
 ```
 
-This correction is intentionally limited to `|linear.x| <= 0.02 m/s`. Moving arcs have not yet been calibrated and are left unchanged.
+This correction is intentionally limited to `|linear.x| <= 0.02 m/s`. Moving arcs have not yet been separately calibrated and are left unchanged.
 
-## Wheel-odometry yaw compensation
+## Final compensated 0.80 rad/s validation
 
-Linear distance remains based on the calibrated cumulative counter scale `0.0102 m/count`.
+With angular command compensation enabled, a requested `0.80 rad/s` for 2.0 seconds produced almost exactly the requested physical yaw rate in both directions.
 
-For heading, the high-quality `1.6` and `2.0 rad/s` LiDAR runs show that raw wheel-counter yaw needs a direction-dependent scale. The bridge now uses:
+Left / CCW:
 
 ```text
-odom_yaw_scale_left  = 0.60
-odom_yaw_scale_right = 0.54
+LIDAR_RESULT: chassis_angle=91.50deg magnitude=91.50deg raw_scan_shift=-91.50deg shift=-122bins bin_size=0.750deg overlap=479 score=0.0185
+ODOM_RESULT: angle=108.25deg center_drift=0.0054m
+RAW_COUNTERS: odl=152->130 delta=-22 odr=104->127 delta=23 delta_difference=45
+TURN_METRICS: commanded_avg=0.8000rad/s lidar_avg=0.7985rad/s response_ratio=0.9981 odom_angle=108.25deg raw_diff=45
 ```
 
-These factors are applied only to angular pose/twist integration. They do not change linear distance.
+Right / CW:
+
+```text
+LIDAR_RESULT: chassis_angle=-91.50deg magnitude=91.50deg raw_scan_shift=91.50deg shift=122bins bin_size=0.750deg overlap=476 score=0.0180
+ODOM_RESULT: angle=-99.08deg center_drift=0.0100m
+RAW_COUNTERS: odl=123->145 delta=22 odr=134->110 delta=-24 delta_difference=-46
+TURN_METRICS: commanded_avg=0.8000rad/s lidar_avg=0.7985rad/s response_ratio=0.9981 odom_angle=-99.08deg raw_diff=-46
+```
+
+The physical angular-command calibration is therefore validated: requested `0.80 rad/s` produced `0.7985 rad/s` in both directions, a response ratio of `0.9981`.
+
+## Wheel-odometry yaw refinement
+
+The compensated test showed that the previous wheel-yaw scales (`0.60` left, `0.54` right) still over-reported heading somewhat. Refining them against the LiDAR reference gives values very close to `0.50` in both directions:
+
+```text
+left refinement  = 0.60 * 91.50 / 108.25 ~= 0.507
+right refinement = 0.54 * 91.50 / 99.08  ~= 0.499
+```
+
+For simplicity and symmetry, bringup now uses:
+
+```text
+odom_yaw_scale_left  = 0.50
+odom_yaw_scale_right = 0.50
+```
+
+Expected yaw with the same raw counter motion is then approximately `90.2 deg` left and `91.7 deg` right, both very close to the LiDAR `91.5 deg` reference.
 
 Yaw covariance remains deliberately conservative because six-wheel skid-steer heading is floor/slip dependent and SLAM must be allowed to correct it.
 
-## Next validation
+## Status / next step
 
-After rebuilding `rower_base_bridge` and restarting bringup, request the physical target directly:
-
-```text
-angular.z = +0.80 rad/s for 2.0 s
-angular.z = -0.80 rad/s for 2.0 s
-```
-
-With compensation active, the expected physical turn is now close to:
-
-```text
-0.80 * 2.0 = 1.60 rad = 91.7 deg
-```
-
-The same LiDAR probe should also show `/odom` yaw much closer to the LiDAR angle than before. Validate both directions before starting SLAM Toolbox / Nav2 closed-loop tuning.
+Straight distance, straight-line drivetrain balance, and in-place angular command response are now calibrated well enough to proceed to SLAM Toolbox testing. One short left/right validation with the final `0.50 / 0.50` wheel-yaw scale is useful before relying on wheel odometry for Nav2, but the physical turn command itself is already validated.
