@@ -22,9 +22,11 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     scan_gate_script = '/workspace/rower_gorod/src/rower_navigation/scripts/scan_gate.py'
 
-    # The gate uses wheel odometry only as a fast motion detector. RF2O consumes
-    # raw /scan continuously and owns the mapping /odom pose, so LiDAR odometry
-    # can still estimate the rotation while SLAM itself ignores distorted scans.
+    # The wheel bridge owns /odom again in mapping mode. The scan gate uses that
+    # odometry as its fast motion detector so it can close during skid-steer
+    # turns and reopen after the robot settles. Keeping require_odom_before_open
+    # enabled prevents distorted startup scans from entering SLAM before pose
+    # feedback is available.
     scan_gate = ExecuteProcess(
         cmd=[
             'python3', scan_gate_script,
@@ -33,7 +35,7 @@ def generate_launch_description():
             '-p', 'input_scan_topic:=/scan',
             '-p', 'output_scan_topic:=/scan_slam',
             '-p', 'cmd_vel_topic:=/cmd_vel',
-            '-p', 'odom_topic:=/wheel_odom',
+            '-p', 'odom_topic:=/odom',
             '-p', 'turn_request_topic:=/mapping/turn_angle_deg',
             '-p', 'command_angular_threshold:=0.05',
             '-p', 'odom_block_threshold:=0.12',
@@ -45,8 +47,9 @@ def generate_launch_description():
         output='screen',
     )
 
-    # RF2O publishes odom->base_link. For map acquisition we keep map identical
-    # to RF2O's odom frame and let slam_toolbox paint occupancy only.
+    # slam_toolbox is configured as an occupancy painter in this mapping mode,
+    # so map is kept identical to odom and the calibrated wheel bridge supplies
+    # odom->base_link. This gives one unambiguous TF authority for robot pose.
     map_to_odom_identity = ExecuteProcess(
         cmd=[
             'ros2', 'run', 'tf2_ros', 'static_transform_publisher',
