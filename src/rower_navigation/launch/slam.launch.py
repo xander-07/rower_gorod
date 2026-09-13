@@ -20,12 +20,11 @@ def generate_launch_description():
     )
 
     use_sim_time = LaunchConfiguration('use_sim_time')
-
-    # The project workspace is bind-mounted into the ROS container at this
-    # stable path by scripts/run_ros2_docker.sh. Run the gate explicitly with
-    # Python instead of relying on ROS libexec discovery.
     scan_gate_script = '/workspace/rower_gorod/src/rower_navigation/scripts/scan_gate.py'
 
+    # The gate uses wheel odometry only as a fast motion detector. RF2O consumes
+    # raw /scan continuously and owns the mapping /odom pose, so LiDAR odometry
+    # can still estimate the rotation while SLAM itself ignores distorted scans.
     scan_gate = ExecuteProcess(
         cmd=[
             'python3', scan_gate_script,
@@ -34,7 +33,7 @@ def generate_launch_description():
             '-p', 'input_scan_topic:=/scan',
             '-p', 'output_scan_topic:=/scan_slam',
             '-p', 'cmd_vel_topic:=/cmd_vel',
-            '-p', 'odom_topic:=/odom',
+            '-p', 'odom_topic:=/wheel_odom',
             '-p', 'turn_request_topic:=/mapping/turn_angle_deg',
             '-p', 'command_angular_threshold:=0.05',
             '-p', 'odom_block_threshold:=0.12',
@@ -46,9 +45,8 @@ def generate_launch_description():
         output='screen',
     )
 
-    # During map acquisition, map is intentionally the same metric frame as
-    # odom. slam_toolbox is configured with transform_publish_period=0.0, so it
-    # cannot move map->odom underneath the robot while matching scans.
+    # RF2O publishes odom->base_link. For map acquisition we keep map identical
+    # to RF2O's odom frame and let slam_toolbox paint occupancy only.
     map_to_odom_identity = ExecuteProcess(
         cmd=[
             'ros2', 'run', 'tf2_ros', 'static_transform_publisher',
@@ -59,9 +57,6 @@ def generate_launch_description():
         output='screen',
     )
 
-    # slam_toolbox is a lifecycle node on ROS 2 Jazzy. It now only paints the
-    # occupancy grid at poses supplied by the calibrated odometry; scan matching
-    # and loop-closure pose corrections are disabled in slam_toolbox.yaml.
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(official_online_async),
         launch_arguments={
@@ -80,7 +75,5 @@ def generate_launch_description():
         ),
         map_to_odom_identity,
         scan_gate,
-        # Give fixed TF, gate and odometry a moment to appear before slam_toolbox
-        # subscribes to the filtered scan stream.
         TimerAction(period=0.8, actions=[slam]),
     ])
