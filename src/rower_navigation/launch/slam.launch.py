@@ -3,10 +3,9 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
 
 
 def generate_launch_description():
@@ -22,26 +21,30 @@ def generate_launch_description():
 
     use_sim_time = LaunchConfiguration('use_sim_time')
 
-    # A rotating 2D LiDAR produces motion-distorted 360-degree scans on a fast
-    # skid-steer turn. Keep raw /scan for diagnostics, but only let SLAM see
-    # /scan_slam after the chassis has settled rotationally.
-    scan_gate = Node(
-        package='rower_navigation',
-        executable='scan_gate.py',
-        name='rower_slam_scan_gate',
+    # The project workspace is bind-mounted into the ROS container at this
+    # stable path by scripts/run_ros2_docker.sh. Run the gate explicitly with
+    # Python instead of relying on ROS libexec discovery; this also works with
+    # an existing --symlink-install overlay when a new helper script was added
+    # after the package was first configured.
+    scan_gate_script = '/workspace/rower_gorod/src/rower_navigation/scripts/scan_gate.py'
+
+    scan_gate = ExecuteProcess(
+        cmd=[
+            'python3', scan_gate_script,
+            '--ros-args',
+            '-r', '__node:=rower_slam_scan_gate',
+            '-p', 'input_scan_topic:=/scan',
+            '-p', 'output_scan_topic:=/scan_slam',
+            '-p', 'cmd_vel_topic:=/cmd_vel',
+            '-p', 'odom_topic:=/odom',
+            '-p', 'command_angular_threshold:=0.05',
+            '-p', 'odom_block_threshold:=0.12',
+            '-p', 'odom_release_threshold:=0.05',
+            '-p', 'command_freshness_sec:=0.30',
+            '-p', 'settle_time_sec:=0.60',
+            '-p', 'require_odom_before_open:=true',
+        ],
         output='screen',
-        parameters=[{
-            'input_scan_topic': '/scan',
-            'output_scan_topic': '/scan_slam',
-            'cmd_vel_topic': '/cmd_vel',
-            'odom_topic': '/odom',
-            'command_angular_threshold': 0.05,
-            'odom_block_threshold': 0.12,
-            'odom_release_threshold': 0.05,
-            'command_freshness_sec': 0.30,
-            'settle_time_sec': 0.60,
-            'require_odom_before_open': True,
-        }],
     )
 
     # slam_toolbox is a lifecycle node on ROS 2 Jazzy. Using its official
