@@ -26,7 +26,14 @@ def crc8_ldrobot(data: bytes) -> int:
 
 
 class RowerLidar(Node):
-    """STL-19P / LD19-family serial driver publishing sensor_msgs/LaserScan."""
+    """STL-19P / LD19-family serial driver publishing ROS-convention LaserScan.
+
+    LDROBOT reports angles in a left-handed sensor convention: raw angle grows
+    clockwise. ROS LaserScan requires positive angles to grow counter-clockwise
+    about +Z. Raw packet angles are therefore mirrored before being placed into
+    scan bins. Keeping this conversion in the driver makes SLAM, TF and laser
+    odometry all use the same right-handed ROS coordinate convention.
+    """
 
     def __init__(self) -> None:
         super().__init__('rower_lidar')
@@ -59,7 +66,7 @@ class RowerLidar(Node):
         self.rx = bytearray()
         self.ranges = [math.inf] * self.bins
         self.intensities = [0.0] * self.bins
-        self.last_angle = None
+        self.last_raw_angle = None
         self.last_wrap_time = None
         self.valid_points_this_scan = 0
         self.scans = 0
@@ -70,12 +77,18 @@ class RowerLidar(Node):
         self.create_timer(0.005, self._poll_serial)
         self.get_logger().info(
             f'Opened STL-19P on {self.serial_port} at {self.baud} baud; '
-            f'publishing /scan with {self.bins} bins, frame={self.frame_id}'
+            f'publishing /scan with {self.bins} bins, frame={self.frame_id}; '
+            'raw CW angles converted to ROS CCW convention'
         )
 
     @staticmethod
     def _u16le(buf: bytes, offset: int) -> int:
         return buf[offset] | (buf[offset + 1] << 8)
+
+    @staticmethod
+    def _raw_to_ros_angle_deg(raw_angle_deg: float) -> float:
+        # LDROBOT: positive angle = clockwise. ROS: positive angle = CCW.
+        return (-raw_angle_deg) % 360.0
 
     def _poll_serial(self) -> None:
         waiting = self.ser.in_waiting
@@ -116,19 +129,27 @@ class RowerLidar(Node):
         delta = (end_deg - start_deg) % 360.0
 
         for i in range(POINTS_PER_PACKET):
-            angle = (start_deg + delta * i / (POINTS_PER_PACKET - 1)) % 360.0
+            raw_angle = (start_deg + delta * i / (POINTS_PER_PACKET - 1)) % 360.0
             offset = 6 + i * 3
             distance_mm = self._u16le(frame, offset)
             confidence = frame[offset + 2]
 
-            if self.last_angle is not None and self.last_angle > 300.0 and angle < 60.0:
+            # Detect one complete physical revolution in the native LDROBOT
+            # clockwise angle domain. Do this before mirroring into ROS bins.
+            if (
+                self.last_raw_angle is not None
+                and self.last_raw_angle > 300.0
+                and raw_angle < 60.0
+            ):
                 self._publish_scan()
                 self.ranges = [math.inf] * self.bins
                 self.intensities = [0.0] * self.bins
                 self.valid_points_this_scan = 0
 
-            self.last_angle = angle
-            index = int((angle / 360.0) * self.bins) % self.bins
+            self.last_raw_angle = raw_angle
+
+            ros_angle = self._raw_to_ros_angle_deg(raw_angle)
+            index = int((ros_angle / 360.0) * self.bins) % self.bins
 
             if distance_mm <= 0 or confidence < self.min_confidence:
                 continue
@@ -161,7 +182,12 @@ class RowerLidar(Node):
         msg.angle_increment = (2.0 * math.pi) / self.bins
         msg.angle_max = msg.angle_min + msg.angle_increment * (self.bins - 1)
         msg.scan_time = scan_time
-        msg.time_increment = scan_time / self.bins
+
+        # The sensor physically acquires clockwise while the published array is
+        # ordered counter-clockwise to satisfy ROS. There is therefore no valid
+        # positive per-index acquisition delay; advertise zero rather than a
+        # misleading scan_time / bins value.
+        msg.time_increment = 0.0
         msg.range_min = self.range_min
         msg.range_max = self.range_max
         msg.ranges = list(self.ranges)
