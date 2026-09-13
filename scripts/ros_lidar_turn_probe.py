@@ -163,7 +163,7 @@ def main() -> int:
         description='Estimate real in-place rotation from LiDAR and compare it with wheel odometry.'
     )
     parser.add_argument('--run', action='store_true', help='Required to allow motion.')
-    parser.add_argument('--angular', type=float, default=0.80, help='Angular command rad/s, +/-0.40..2.00.')
+    parser.add_argument('--angular', type=float, default=0.25, help='Angular command rad/s, +/-0.20..2.00.')
     parser.add_argument('--seconds', type=float, default=2.0, help='Command duration 1.0..3.0 s.')
     parser.add_argument('--rate', type=float, default=10.0, help='cmd_vel publish rate 5..20 Hz.')
     parser.add_argument('--scans', type=int, default=9, help='Number of scans to median before/after.')
@@ -174,8 +174,8 @@ def main() -> int:
     if not args.run:
         print('REFUSING TO TURN: pass --run only after clearing space around the robot.')
         return 2
-    if not (0.40 <= abs(args.angular) <= 2.00):
-        print('ERROR: |--angular| must be between 0.40 and 2.00 rad/s.')
+    if not (0.20 <= abs(args.angular) <= 2.00):
+        print('ERROR: |--angular| must be between 0.20 and 2.00 rad/s.')
         return 2
     if not (1.0 <= args.seconds <= 3.0):
         print('ERROR: --seconds must be between 1.0 and 3.0 s.')
