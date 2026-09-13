@@ -22,13 +22,36 @@ def generate_launch_description():
     web_port = LaunchConfiguration('web_port')
     rosbridge_port = LaunchConfiguration('rosbridge_port')
 
+    # During mapping, wheel odometry remains available on /wheel_odom for motor
+    # control and diagnostics, but it no longer owns odom->base_link. RF2O uses
+    # consecutive LiDAR scans to estimate the actual 2D robot motion, including
+    # in-place rotation, and publishes the mapping /odom + odom->base_link TF.
     robot_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bringup_share, 'launch', 'robot.launch.py')
         ),
         launch_arguments={
             'enable_motion': enable_motion,
+            'publish_tf': 'false',
+            'odom_topic': '/wheel_odom',
+            'odom_frame': 'wheel_odom',
         }.items(),
+    )
+
+    rf2o = Node(
+        package='rf2o_laser_odometry',
+        executable='rf2o_laser_odometry_node',
+        name='rf2o_laser_odometry',
+        output='screen',
+        parameters=[{
+            'laser_scan_topic': '/scan',
+            'odom_topic': '/odom',
+            'publish_tf': True,
+            'base_frame_id': 'base_link',
+            'odom_frame_id': 'odom',
+            'init_pose_from_topic': '',
+            'freq': 20.0,
+        }],
     )
 
     slam_launch = IncludeLaunchDescription(
@@ -40,9 +63,9 @@ def generate_launch_description():
         }.items(),
     )
 
-    # The workspace is bind-mounted at this stable path by run_ros2_docker.sh.
-    # Run the mapping turn helper directly so a newly added script does not
-    # depend on an already-configured colcon libexec overlay.
+    # Keep turn stopping on the already LiDAR-calibrated wheel odometry. RF2O is
+    # responsible for the mapping pose; the wheel counters are still the safest
+    # short-horizon feedback for the motor stop threshold.
     turn_controller_script = '/workspace/rower_gorod/src/rower_navigation/scripts/turn_controller.py'
     turn_controller = ExecuteProcess(
         cmd=[
@@ -52,7 +75,7 @@ def generate_launch_description():
             '-p', 'request_topic:=/mapping/turn_angle_deg',
             '-p', 'state_topic:=/mapping/turn_active',
             '-p', 'cmd_vel_topic:=/cmd_vel',
-            '-p', 'odom_topic:=/odom',
+            '-p', 'odom_topic:=/wheel_odom',
             '-p', 'emergency_topic:=/base/emergency_stop',
             '-p', 'angular_command:=0.40',
             '-p', 'left_stop_margin_deg:=3.0',
@@ -65,8 +88,6 @@ def generate_launch_description():
         output='screen',
     )
 
-    # Local-only browser dashboard transport. No cloud/external website is
-    # required: the browser connects directly to the Raspberry Pi.
     rosbridge = Node(
         package='rosbridge_server',
         executable='rosbridge_websocket',
@@ -91,35 +112,15 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument(
-            'enable_motion',
-            default_value='false',
-            description='Allow /cmd_vel to drive the physical robot. Default false for safe SLAM startup.',
-        ),
-        DeclareLaunchArgument(
-            'use_sim_time',
-            default_value='false',
-            description='Use simulation clock. Keep false on the physical robot.',
-        ),
-        DeclareLaunchArgument(
-            'enable_web',
-            default_value='true',
-            description='Serve the local SLAM dashboard and rosbridge WebSocket.',
-        ),
-        DeclareLaunchArgument(
-            'web_port',
-            default_value='8080',
-            description='HTTP port for the local browser dashboard.',
-        ),
-        DeclareLaunchArgument(
-            'rosbridge_port',
-            default_value='9090',
-            description='WebSocket port used by the local dashboard.',
-        ),
+        DeclareLaunchArgument('enable_motion', default_value='false', description='Allow /cmd_vel to drive the physical robot.'),
+        DeclareLaunchArgument('use_sim_time', default_value='false', description='Use simulation clock. Keep false on the physical robot.'),
+        DeclareLaunchArgument('enable_web', default_value='true', description='Serve the local SLAM dashboard and rosbridge WebSocket.'),
+        DeclareLaunchArgument('web_port', default_value='8080', description='HTTP port for the local browser dashboard.'),
+        DeclareLaunchArgument('rosbridge_port', default_value='9090', description='WebSocket port used by the local dashboard.'),
         robot_launch,
+        rf2o,
         turn_controller,
         rosbridge,
         web_server,
-        # Give LiDAR, odometry and static TF a moment to appear before SLAM.
         TimerAction(period=2.0, actions=[slam_launch]),
     ])
