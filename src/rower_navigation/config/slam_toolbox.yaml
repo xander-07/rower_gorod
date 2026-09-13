@@ -2,11 +2,13 @@ slam_toolbox:
   ros__parameters:
     use_sim_time: false
 
-    # Frames/topics from the validated Rower stack.
+    # Frames/topics from the validated Rower stack. SLAM intentionally consumes
+    # the gated scan stream: raw /scan remains available for diagnostics/UI,
+    # while motion-distorted scans measured during in-place turns are suppressed.
     odom_frame: odom
     map_frame: map
     base_frame: base_link
-    scan_topic: /scan
+    scan_topic: /scan_slam
     mode: mapping
 
     # Solver.
@@ -27,14 +29,15 @@ slam_toolbox:
     transform_timeout: 0.50
     tf_buffer_duration: 30.0
 
-    # STL-19P publishes about 10 Hz. Processing every second scan (~5 Hz) is
-    # sufficient at our low mapping speeds and prevents the SLAM message-filter
-    # queue from being saturated on the Pi.
+    # STL-19P publishes about 10 Hz. Processing every second stable scan (~5 Hz)
+    # is sufficient at our low mapping speeds and leaves CPU headroom on the Pi.
     throttle_scans: 2
     stack_size_to_use: 40000000
     enable_interactive_mode: true
 
-    # Process motion in small increments; the robot moves slowly in the arena.
+    # Process motion in small increments; straight-line scans are still accepted.
+    # During turns the scan gate pauses SLAM input and odometry carries heading;
+    # after the chassis settles a fresh undistorted scan resumes scan matching.
     use_scan_matching: true
     use_scan_barycenter: true
     minimum_travel_distance: 0.03
