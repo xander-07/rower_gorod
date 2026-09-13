@@ -40,6 +40,10 @@ RUN --mount=type=secret,id=local_ca,target=/usr/local/share/ca-certificates/rowe
 # Ubuntu Noble/arm64. Build the upstream ROS 2 implementation from a pinned
 # commit so Raspberry Pi builds are reproducible instead of depending on a
 # non-existent ros-jazzy-rf2o-laser-odometry apt package.
+#
+# IMPORTANT for Raspberry Pi 4 / 4 GB: force a single compiler job. Eigen-heavy
+# C++ compilation can otherwise start several cc1plus processes at once and push
+# the Pi into swap/thrashing, making SSH appear frozen.
 RUN mkdir -p /tmp/rf2o_ws/src/rf2o_laser_odometry \
     && cd /tmp/rf2o_ws/src/rf2o_laser_odometry \
     && git init \
@@ -48,11 +52,12 @@ RUN mkdir -p /tmp/rf2o_ws/src/rf2o_laser_odometry \
     && git checkout --detach FETCH_HEAD \
     && cd /tmp/rf2o_ws \
     && . /opt/ros/jazzy/setup.sh \
-    && colcon build \
+    && CMAKE_BUILD_PARALLEL_LEVEL=1 MAKEFLAGS=-j1 colcon build \
+         --executor sequential \
          --merge-install \
          --install-base /opt/rf2o \
          --packages-select rf2o_laser_odometry \
-         --cmake-args -DCMAKE_BUILD_TYPE=Release \
+         --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
     && rm -rf /tmp/rf2o_ws
 
 WORKDIR /workspace/rower_gorod
