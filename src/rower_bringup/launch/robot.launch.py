@@ -48,13 +48,13 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'pwm_turn_left',
-            default_value='60',
-            description='Raw PWM magnitude for left/CCW in-place breakaway and turning.',
+            default_value='80',
+            description='Raw PWM magnitude for left/CCW in-place turning.',
         ),
         DeclareLaunchArgument(
             'pwm_turn_right',
-            default_value='60',
-            description='Raw PWM magnitude for right/CW in-place breakaway and turning.',
+            default_value='80',
+            description='Raw PWM magnitude for right/CW in-place turning.',
         ),
         DeclareLaunchArgument(
             'left_command_scale',
