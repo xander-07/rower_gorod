@@ -3,9 +3,10 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
@@ -21,10 +22,30 @@ def generate_launch_description():
 
     use_sim_time = LaunchConfiguration('use_sim_time')
 
-    # slam_toolbox is a lifecycle node on ROS 2 Jazzy.  Using its official
+    # A rotating 2D LiDAR produces motion-distorted 360-degree scans on a fast
+    # skid-steer turn. Keep raw /scan for diagnostics, but only let SLAM see
+    # /scan_slam after the chassis has settled rotationally.
+    scan_gate = Node(
+        package='rower_navigation',
+        executable='scan_gate.py',
+        name='rower_slam_scan_gate',
+        output='screen',
+        parameters=[{
+            'input_scan_topic': '/scan',
+            'output_scan_topic': '/scan_slam',
+            'cmd_vel_topic': '/cmd_vel',
+            'odom_topic': '/odom',
+            'command_angular_threshold': 0.05,
+            'odom_block_threshold': 0.12,
+            'odom_release_threshold': 0.05,
+            'command_freshness_sec': 0.30,
+            'settle_time_sec': 0.60,
+            'require_odom_before_open': True,
+        }],
+    )
+
+    # slam_toolbox is a lifecycle node on ROS 2 Jazzy. Using its official
     # online_async launch is important: it configures and activates the node.
-    # Starting async_slam_toolbox_node as a plain Node leaves /slam_toolbox
-    # visible in `ros2 node list`, but no /map or map->odom TF is produced.
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(official_online_async),
         launch_arguments={
@@ -41,5 +62,8 @@ def generate_launch_description():
             default_value='false',
             description='Use simulation clock. Keep false on the physical robot.',
         ),
-        slam,
+        scan_gate,
+        # Give the gate and odometry a moment to appear before slam_toolbox
+        # subscribes to the filtered scan stream.
+        TimerAction(period=0.8, actions=[slam]),
     ])
