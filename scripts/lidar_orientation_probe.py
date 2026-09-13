@@ -49,8 +49,8 @@ def main() -> int:
     parser.add_argument(
         '--lidar-yaw-deg',
         type=float,
-        default=90.0,
-        help='Current base_link->laser yaw assumption in degrees (default: +90).',
+        default=-90.0,
+        help='Current base_link->laser yaw assumption in degrees (default: -90, wall-validated).',
     )
     parser.add_argument('--sector-deg', type=float, default=20.0, help='Half-width of each direction sector.')
     args = parser.parse_args()
@@ -130,7 +130,6 @@ def main() -> int:
             print('NEAREST: unavailable')
             return 3
 
-        front_p10 = percentile(buckets['FRONT'], 0.10)
         side_candidates = [
             (name, percentile(vals, 0.10))
             for name, vals in buckets.items()
@@ -141,11 +140,14 @@ def main() -> int:
             closest_name, closest_value = min(side_candidates, key=lambda item: item[1])
             print(f'CLASSIFICATION: closest_sector={closest_name} p10={closest_value:.3f}m')
             if closest_name == 'FRONT':
-                print('RESULT: current +90 deg LiDAR yaw is CONSISTENT with a wall placed in front.')
+                print(
+                    f'RESULT: current {args.lidar_yaw_deg:+.1f} deg LiDAR yaw is '
+                    'CONSISTENT with a wall placed in front.'
+                )
             else:
                 print(
-                    'RESULT: current LiDAR yaw is NOT CONSISTENT with the test scene. '
-                    'Do not change URDF yet; send this output so the required correction can be computed.'
+                    f'RESULT: current {args.lidar_yaw_deg:+.1f} deg LiDAR yaw is '
+                    'NOT CONSISTENT with the test scene.'
                 )
         return 0
     finally:
