@@ -140,7 +140,7 @@ def main() -> int:
     parser.add_argument('--port', default='/dev/rower_base')
     parser.add_argument('--baud', type=int, default=115200)
     parser.add_argument('--direction', choices=('left', 'right'), required=True)
-    parser.add_argument('--pwm', type=int, default=30, help='Absolute PWM per side, 20..60.')
+    parser.add_argument('--pwm', type=int, default=30, help='Absolute PWM per side, 20..80.')
     parser.add_argument('--seconds', type=float, default=0.8, help='Turn duration, 0.4..1.5 s.')
     parser.add_argument('--rate', type=float, default=10.0, help='PWM command repeat rate, 5..20 Hz.')
     parser.add_argument('--scans', type=int, default=7, help='Median scans before/after, 3..12.')
@@ -151,8 +151,8 @@ def main() -> int:
     if not args.run:
         print('REFUSING TO TURN: pass --run only after clearing space around the robot.')
         return 2
-    if not (20 <= abs(args.pwm) <= 60):
-        print('ERROR: |--pwm| must be in 20..60.')
+    if not (20 <= abs(args.pwm) <= 80):
+        print('ERROR: |--pwm| must be in 20..80.')
         return 2
     if not (0.4 <= args.seconds <= 1.5):
         print('ERROR: --seconds must be in 0.4..1.5 s.')
