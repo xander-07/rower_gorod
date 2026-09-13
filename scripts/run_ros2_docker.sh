@@ -52,18 +52,27 @@ if [[ -n "$DIALOUT_GID" ]]; then
   ARGS+=(--group-add "$DIALOUT_GID")
 fi
 
+ROS_SETUP='source /opt/ros/jazzy/setup.bash; if [[ -f /opt/rf2o/setup.bash ]]; then source /opt/rf2o/setup.bash; fi; if [[ -f /workspace/rower_gorod/install/setup.bash ]]; then source /workspace/rower_gorod/install/setup.bash; fi'
+
 if (( $# > 0 )); then
-  # One-shot command mode. ROS and the local workspace are sourced automatically,
-  # so callers can run ROS commands directly from the Debian host.
+  # One-shot command mode. ROS, the RF2O source-built overlay and the local
+  # workspace are sourced automatically, so callers can run ROS commands
+  # directly from the Debian host.
   ARGS+=(
     "$IMAGE"
     bash -lc
-    'source /opt/ros/jazzy/setup.bash; if [[ -f /workspace/rower_gorod/install/setup.bash ]]; then source /workspace/rower_gorod/install/setup.bash; fi; exec "$@"'
+    "$ROS_SETUP; exec \"\$@\""
     bash
     "$@"
   )
 else
-  ARGS+=("$IMAGE" bash)
+  # Interactive mode inherits the same sourced overlays before opening the
+  # user's shell.
+  ARGS+=(
+    "$IMAGE"
+    bash -lc
+    "$ROS_SETUP; exec bash"
+  )
 fi
 
 exec docker "${ARGS[@]}"
