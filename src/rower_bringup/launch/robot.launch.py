@@ -78,8 +78,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'odom_yaw_scale_left',
-            default_value='0.49',
-            description='LiDAR-calibrated left/CCW wheel-counter yaw scale for raw PWM drive.',
+            default_value='0.447',
+            description='LiDAR-calibrated left/CCW wheel-counter yaw scale from 45 and 90 degree raw-PWM turns.',
         ),
         DeclareLaunchArgument(
             'odom_yaw_scale_right',
