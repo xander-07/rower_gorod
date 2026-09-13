@@ -11,6 +11,7 @@ install(
 install(
   PROGRAMS
     scripts/scan_gate.py
+    scripts/turn_controller.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
