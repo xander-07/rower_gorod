@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import statistics
+import sys
+import time
+
+import rclpy
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
+
+
+class AngleTurnProbe(Node):
+    def __init__(self, rate_hz: float) -> None:
+        super().__init__('rower_lidar_angle_turn_probe')
+        self.rate_hz = rate_hz
+        self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.create_subscription(LaserScan, '/scan', self._scan_cb, 10)
+        self.create_subscription(Odometry, '/odom', self._odom_cb, 20)
+        self.create_subscription(String, '/base/raw_feedback', self._raw_cb, 20)
+
+        self.latest_scan: list[float] | None = None
+        self.scan_increment: float | None = None
+        self.scan_seq = 0
+        self.latest_pose: tuple[float, float, float] | None = None
+        self.latest_raw: tuple[float, float] | None = None
+
+    @staticmethod
+    def _yaw(q) -> float:
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        return math.atan2(siny_cosp, cosy_cosp)
+
+    def _scan_cb(self, msg: LaserScan) -> None:
+        self.latest_scan = list(msg.ranges)
+        self.scan_increment = float(msg.angle_increment)
+        self.scan_seq += 1
+
+    def _odom_cb(self, msg: Odometry) -> None:
+        p = msg.pose.pose
+        self.latest_pose = (
+            float(p.position.x),
+            float(p.position.y),
+            self._yaw(p.orientation),
+        )
+
+    def _raw_cb(self, msg: String) -> None:
+        try:
+            payload = json.loads(msg.data)
+            self.latest_raw = (float(payload['odl']), float(payload['odr']))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return
+
+    def publish(self, angular_z: float) -> None:
+        msg = Twist()
+        msg.linear.x = 0.0
+        msg.angular.z = float(angular_z)
+        self.pub.publish(msg)
+
+
+def angle_diff(a: float, b: float) -> float:
+    return math.atan2(math.sin(a - b), math.cos(a - b))
+
+
+def collect_scans(node: AngleTurnProbe, count: int, timeout: float = 4.0) -> list[list[float]]:
+    scans: list[list[float]] = []
+    deadline = time.monotonic() + timeout
+    last_seq = node.scan_seq
+    while len(scans) < count and time.monotonic() < deadline:
+        rclpy.spin_once(node, timeout_sec=0.1)
+        if node.latest_scan is not None and node.scan_seq != last_seq:
+            scans.append(list(node.latest_scan))
+            last_seq = node.scan_seq
+    return scans
+
+
+def median_scan(scans: list[list[float]], min_range: float = 0.08, max_range: float = 8.0) -> list[float]:
+    if not scans:
+        return []
+    n = min(len(s) for s in scans)
+    out: list[float] = []
+    for i in range(n):
+        vals = [s[i] for s in scans if math.isfinite(s[i]) and min_range <= s[i] <= max_range]
+        out.append(statistics.median(vals) if vals else math.inf)
+    return out
+
+
+def robust_shift_score(before: list[float], after: list[float], shift: int) -> tuple[float, int]:
+    n = min(len(before), len(after))
+    diffs: list[float] = []
+    for i in range(n):
+        a = after[i]
+        b = before[(i + shift) % n]
+        if math.isfinite(a) and math.isfinite(b):
+            denom = max(0.20, min(a, b))
+            diffs.append(abs(a - b) / denom)
+    if len(diffs) < max(80, n // 4):
+        return math.inf, len(diffs)
+    diffs.sort()
+    keep = diffs[: max(1, int(len(diffs) * 0.80))]
+    return sum(keep) / len(keep), len(diffs)
+
+
+def estimate_rotation(
+    before: list[float],
+    after: list[float],
+    angle_increment: float,
+    min_angle_deg: float,
+    max_angle_deg: float,
+) -> tuple[float, int, float, int]:
+    n = min(len(before), len(after))
+    if n == 0 or angle_increment <= 0.0:
+        raise ValueError('invalid scan data')
+
+    min_shift = max(1, int(math.radians(min_angle_deg) / angle_increment))
+    max_shift = min(n // 2 - 1, int(math.radians(max_angle_deg) / angle_increment))
+    if min_shift >= max_shift:
+        raise ValueError('invalid LiDAR shift search limits')
+
+    best_shift = None
+    best_score = math.inf
+    best_overlap = 0
+    for shift in range(-max_shift, max_shift + 1):
+        if abs(shift) < min_shift:
+            continue
+        score, overlap = robust_shift_score(before, after, shift)
+        if score < best_score:
+            best_shift = shift
+            best_score = score
+            best_overlap = overlap
+
+    if best_shift is None:
+        raise RuntimeError('could not estimate rotation from scans')
+
+    return best_shift * angle_increment, best_shift, best_score, best_overlap
+
+
+def stop_robot(node: AngleTurnProbe, count: int = 12) -> None:
+    for _ in range(count):
+        node.publish(0.0)
+        rclpy.spin_once(node, timeout_sec=0.03)
+        time.sleep(0.03)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            'Guarded turn-to-angle test. The robot turns via normal ROS /cmd_vel, '
+            'stops when /odom reaches the requested angle (Waveshare-style), and '
+            'then independently verifies the real rotation using LiDAR scan alignment.'
+        )
+    )
+    parser.add_argument('--run', action='store_true', help='Required to allow motion.')
+    parser.add_argument('--angle', type=float, required=True, help='Target chassis angle in degrees. +left, -right; 15..120 deg magnitude.')
+    parser.add_argument('--angular', type=float, default=0.40, help='Command magnitude in rad/s, 0.20..1.00. In current PWM mode this selects turn direction; bridge uses calibrated turn PWM.')
+    parser.add_argument('--rate', type=float, default=20.0, help='Command/control rate, 10..30 Hz.')
+    parser.add_argument('--timeout', type=float, default=8.0, help='Safety timeout in seconds, 2..12 s.')
+    parser.add_argument('--scans', type=int, default=9, help='Median scans before/after, 5..15.')
+    args = parser.parse_args()
+
+    if not args.run:
+        print('REFUSING TO TURN: pass --run only after clearing space around the robot.')
+        return 2
+    if not (15.0 <= abs(args.angle) <= 120.0):
+        print('ERROR: |--angle| must be between 15 and 120 degrees.')
+        return 2
+    if not (0.20 <= abs(args.angular) <= 1.00):
+        print('ERROR: |--angular| must be between 0.20 and 1.00 rad/s.')
+        return 2
+    if not (10.0 <= args.rate <= 30.0):
+        print('ERROR: --rate must be in 10..30 Hz.')
+        return 2
+    if not (2.0 <= args.timeout <= 12.0):
+        print('ERROR: --timeout must be in 2..12 s.')
+        return 2
+    if not (5 <= args.scans <= 15):
+        print('ERROR: --scans must be in 5..15.')
+        return 2
+
+    direction_sign = 1.0 if args.angle > 0.0 else -1.0
+    command = direction_sign * abs(args.angular)
+    target_rad = math.radians(abs(args.angle))
+    direction = 'LEFT / CCW' if direction_sign > 0 else 'RIGHT / CW'
+
+    print('ODOM-CLOSED-LOOP ANGLE TURN TEST ENABLED.')
+    print('This follows the Waveshare behavior-controller idea: command angular velocity, watch /odom yaw, stop at target.')
+    print('LiDAR is used only after the stop as an independent verification of the real chassis angle.')
+    print('Keep mapping STOPPED for this calibration. rower_bringup with enable_motion:=true must be running.')
+    print('Clear at least 0.5 m around the robot and be ready to stop the bringup terminal with Ctrl+C.')
+    print(f'Target: {args.angle:+.1f} deg ({direction}); cmd angular.z={command:+.3f} rad/s; timeout={args.timeout:.1f}s')
+    print('Starting in 3 seconds...')
+    time.sleep(3.0)
+
+    rclpy.init()
+    node = AngleTurnProbe(args.rate)
+    try:
+        stop_robot(node, 8)
+
+        before_raw = collect_scans(node, args.scans)
+        if len(before_raw) < 5 or node.scan_increment is None:
+            print('ERROR: not enough /scan data. Ensure rower_bringup/lidar is running.')
+            return 3
+        if node.latest_pose is None:
+            print('ERROR: no /odom data. Ensure rower_base_bridge is running.')
+            return 3
+
+        before_scan = median_scan(before_raw)
+        x0, y0, yaw0 = node.latest_pose
+        raw0 = node.latest_raw
+
+        period = 1.0 / args.rate
+        deadline = time.monotonic() + args.timeout
+        reached = False
+        max_progress = 0.0
+
+        while time.monotonic() < deadline:
+            started = time.monotonic()
+            node.publish(command)
+            rclpy.spin_once(node, timeout_sec=min(0.02, period))
+
+            if node.latest_pose is not None:
+                progress = direction_sign * angle_diff(node.latest_pose[2], yaw0)
+                max_progress = max(max_progress, progress)
+                if progress >= target_rad:
+                    reached = True
+                    break
+
+            delay = period - (time.monotonic() - started)
+            if delay > 0:
+                time.sleep(delay)
+
+        stop_robot(node, 14)
+        time.sleep(0.20)
+        for _ in range(8):
+            rclpy.spin_once(node, timeout_sec=0.05)
+
+        if not reached:
+            print(f'ERROR: target not reached before timeout; max_odom_progress={math.degrees(max_progress):.2f}deg')
+            return 4
+        if node.latest_pose is None:
+            print('ERROR: /odom disappeared after turn')
+            return 3
+
+        x1, y1, yaw1 = node.latest_pose
+        odom_angle = math.degrees(angle_diff(yaw1, yaw0))
+        drift = math.hypot(x1 - x0, y1 - y0)
+        raw1 = node.latest_raw
+
+        after_raw = collect_scans(node, args.scans)
+        if len(after_raw) < 5:
+            print('ERROR: not enough /scan data after turn.')
+            return 3
+        after_scan = median_scan(after_raw)
+
+        min_angle = max(5.0, abs(args.angle) - 40.0)
+        max_angle = min(170.0, abs(args.angle) + 40.0)
+        shift_angle, shift, score, overlap = estimate_rotation(
+            before_scan,
+            after_scan,
+            node.scan_increment,
+            min_angle,
+            max_angle,
+        )
+        lidar_magnitude = abs(math.degrees(shift_angle))
+        lidar_angle = direction_sign * lidar_magnitude
+
+        print(
+            'ANGLE_TURN_RESULT: '
+            f'target={args.angle:+.2f}deg '
+            f'odom={odom_angle:+.2f}deg '
+            f'lidar={lidar_angle:+.2f}deg '
+            f'odom_error={odom_angle - args.angle:+.2f}deg '
+            f'lidar_error={lidar_angle - args.angle:+.2f}deg '
+            f'center_drift={drift:.4f}m'
+        )
+        print(
+            'LIDAR_VERIFY: '
+            f'raw_scan_shift={math.degrees(shift_angle):+.2f}deg '
+            f'shift={shift}bins overlap={overlap} score={score:.4f}'
+        )
+
+        if raw0 is not None and raw1 is not None:
+            dl = raw1[0] - raw0[0]
+            dr = raw1[1] - raw0[1]
+            print(
+                'RAW_COUNTERS: '
+                f'odl={raw0[0]:.0f}->{raw1[0]:.0f} delta={dl:.0f} '
+                f'odr={raw0[1]:.0f}->{raw1[1]:.0f} delta={dr:.0f} '
+                f'delta_difference={dr - dl:.0f}'
+            )
+        else:
+            print('RAW_COUNTERS: unavailable')
+
+        if score <= 0.08:
+            print('TURN_VERIFY_SUMMARY: LiDAR match is strong. Compare target, odom and lidar errors above.')
+        else:
+            print('TURN_VERIFY_SUMMARY: LiDAR match is weak; repeat in a more asymmetric static scene before changing calibration.')
+        return 0
+    finally:
+        try:
+            stop_robot(node, 8)
+        except Exception:
+            pass
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    sys.exit(main())
