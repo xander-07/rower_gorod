@@ -23,9 +23,7 @@ def generate_launch_description():
 
     # The project workspace is bind-mounted into the ROS container at this
     # stable path by scripts/run_ros2_docker.sh. Run the gate explicitly with
-    # Python instead of relying on ROS libexec discovery; this also works with
-    # an existing --symlink-install overlay when a new helper script was added
-    # after the package was first configured.
+    # Python instead of relying on ROS libexec discovery.
     scan_gate_script = '/workspace/rower_gorod/src/rower_navigation/scripts/scan_gate.py'
 
     scan_gate = ExecuteProcess(
@@ -37,6 +35,7 @@ def generate_launch_description():
             '-p', 'output_scan_topic:=/scan_slam',
             '-p', 'cmd_vel_topic:=/cmd_vel',
             '-p', 'odom_topic:=/odom',
+            '-p', 'turn_request_topic:=/mapping/turn_angle_deg',
             '-p', 'command_angular_threshold:=0.05',
             '-p', 'odom_block_threshold:=0.12',
             '-p', 'odom_release_threshold:=0.05',
