@@ -2,9 +2,9 @@ slam_toolbox:
   ros__parameters:
     use_sim_time: false
 
-    # Frames/topics from the validated Rower stack. SLAM intentionally consumes
-    # the gated scan stream: raw /scan remains available for diagnostics/UI,
-    # while motion-distorted scans measured during in-place turns are suppressed.
+    # Frames/topics from the validated Rower stack. SLAM consumes the gated
+    # scan stream so motion-distorted 360-degree scans from in-place turns are
+    # never inserted into the map.
     odom_frame: odom
     map_frame: map
     base_frame: base_link
@@ -19,43 +19,49 @@ slam_toolbox:
     ceres_dogleg_type: TRADITIONAL_DOGLEG
     ceres_loss_function: None
 
-    # Compact arena. Keep useful detail, but leave CPU headroom for the base,
-    # LiDAR and local browser dashboard on Raspberry Pi 4.
+    # Compact 4x4 m arena. Keep detail while leaving CPU headroom on Raspberry Pi 4.
     resolution: 0.025
     max_laser_range: 8.0
     minimum_time_interval: 0.20
     transform_publish_period: 0.05
-    map_update_interval: 2.0
+    map_update_interval: 1.0
     transform_timeout: 0.50
     tf_buffer_duration: 30.0
 
-    # STL-19P publishes about 10 Hz. Processing every second stable scan (~5 Hz)
-    # is sufficient at our low mapping speeds and leaves CPU headroom on the Pi.
+    # STL-19P is about 10 Hz. The gate suppresses turn scans; processing every
+    # second accepted scan is enough at our mapping speed.
     throttle_scans: 2
     stack_size_to_use: 40000000
     enable_interactive_mode: true
 
-    # Process motion in small increments; straight-line scans are still accepted.
-    # During turns the scan gate pauses SLAM input and odometry carries heading;
-    # after the chassis settles a fresh undistorted scan resumes scan matching.
-    use_scan_matching: true
-    use_scan_barycenter: true
-    minimum_travel_distance: 0.03
-    minimum_travel_heading: 0.03
+    # IMPORTANT: the real robot's encoder odometry is now physically calibrated
+    # for straight motion and for left/right turns. The previous failure came
+    # from scan matching continuously correcting map->odom so aggressively that
+    # the robot pose stayed near the same place in map while the LiDAR geometry
+    # moved around it. For map acquisition we therefore use odometry as the
+    # authoritative pose and use LiDAR only to paint occupancy.
+    use_scan_matching: false
+    use_scan_barycenter: false
+    minimum_travel_distance: 0.02
+    minimum_travel_heading: 0.02
+    check_min_dist_and_heading_precisely: true
     scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 5.0
     link_match_minimum_response_fine: 0.10
     link_scan_maximum_distance: 1.0
 
-    # Loop closure is useful in the compact arena.
-    do_loop_closing: true
+    # Do not let loop-closure optimization move already-built map sections while
+    # we are validating the odometry-anchored map. The saved map can later be
+    # used with localization (AMCL/Nav2), where scan matching is appropriate.
+    do_loop_closing: false
     loop_search_maximum_distance: 3.0
     loop_match_minimum_chain_size: 8
     loop_match_maximum_variance_coarse: 3.0
     loop_match_minimum_response_coarse: 0.35
     loop_match_minimum_response_fine: 0.45
 
-    # Scan matcher search windows kept close to slam_toolbox defaults.
+    # Kept explicit for slam_toolbox compatibility; these are inactive while
+    # use_scan_matching/do_loop_closing are false.
     correlation_search_space_dimension: 0.50
     correlation_search_space_resolution: 0.01
     correlation_search_space_smear_deviation: 0.10
