@@ -18,14 +18,18 @@
       x = +40 mm (midpoint of measured +35..+45 mm forward offset)
       y = 0 mm (assumed centered laterally)
       z = 115.5 mm
-      yaw = +90 deg because the lidar's marked zero/arrow points to the
-            robot's left while robot +X points forward.
+      yaw = -90 deg.
+
+    The sign was validated empirically on the real robot on 2026-09-13:
+    with the previous +90 deg assumption, a broad wall physically placed about
+    0.5 m in front was reported at base angle +179.3 deg (BACK). Correcting the
+    transform by 180 deg places that wall at the robot FRONT, hence -90 deg.
   -->
 
   <xacro:arg name="lidar_x" default="0.040"/>
   <xacro:arg name="lidar_y" default="0.000"/>
   <xacro:arg name="lidar_z" default="0.1155"/>
-  <xacro:arg name="lidar_yaw" default="1.5707963267948966"/>
+  <xacro:arg name="lidar_yaw" default="-1.5707963267948966"/>
 
   <link name="base_link">
     <visual>
