@@ -34,13 +34,13 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'left_command_scale',
-            default_value='0.965',
-            description='Calibrated multiplicative gain for the left drive side.',
+            default_value='1.0',
+            description='Left drive gain. Long floor test showed factory-balanced 1.0 is stable at 0.10 m/s.',
         ),
         DeclareLaunchArgument(
             'right_command_scale',
-            default_value='1.035',
-            description='Calibrated multiplicative gain for the right drive side.',
+            default_value='1.0',
+            description='Right drive gain. Long floor test showed factory-balanced 1.0 is stable at 0.10 m/s.',
         ),
         DeclareLaunchArgument(
             'odom_meters_per_count',
