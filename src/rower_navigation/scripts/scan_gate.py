@@ -9,6 +9,7 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Float64
 
 
 class SlamScanGate(Node):
@@ -19,10 +20,10 @@ class SlamScanGate(Node):
     of the revolution were measured at different chassis headings. Feeding those
     scans into slam_toolbox produced the observed fan/duplicated-wall failure.
 
-    This node closes immediately on an angular /cmd_vel command, also watches
-    measured odometry as a safety backstop, and only reopens after the chassis
-    has remained rotationally quiet for a short settling interval. Straight-line
-    scans continue to pass through normally.
+    This node closes immediately on a discrete mapping turn request or angular
+    /cmd_vel command, also watches measured odometry as a safety backstop, and
+    only reopens after the chassis has remained rotationally quiet for a short
+    settling interval. Straight-line scans continue to pass through normally.
     """
 
     def __init__(self) -> None:
@@ -32,6 +33,7 @@ class SlamScanGate(Node):
         self.declare_parameter('output_scan_topic', '/scan_slam')
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
         self.declare_parameter('odom_topic', '/odom')
+        self.declare_parameter('turn_request_topic', '/mapping/turn_angle_deg')
         self.declare_parameter('command_angular_threshold', 0.05)
         self.declare_parameter('odom_block_threshold', 0.12)
         self.declare_parameter('odom_release_threshold', 0.05)
@@ -43,6 +45,7 @@ class SlamScanGate(Node):
         output_scan = str(self.get_parameter('output_scan_topic').value)
         cmd_topic = str(self.get_parameter('cmd_vel_topic').value)
         odom_topic = str(self.get_parameter('odom_topic').value)
+        turn_request_topic = str(self.get_parameter('turn_request_topic').value)
         self.command_threshold = float(self.get_parameter('command_angular_threshold').value)
         self.odom_block_threshold = float(self.get_parameter('odom_block_threshold').value)
         self.odom_release_threshold = float(self.get_parameter('odom_release_threshold').value)
@@ -63,6 +66,7 @@ class SlamScanGate(Node):
         self.create_subscription(LaserScan, input_scan, self._scan_cb, qos_profile_sensor_data)
         self.create_subscription(Twist, cmd_topic, self._cmd_cb, 10)
         self.create_subscription(Odometry, odom_topic, self._odom_cb, 20)
+        self.create_subscription(Float64, turn_request_topic, self._turn_request_cb, 10)
 
         now = time.monotonic()
         self.blocked = True
@@ -78,7 +82,7 @@ class SlamScanGate(Node):
         self.create_timer(0.02, self._state_timer)
         self.get_logger().warning(
             f'SLAM scan gate active: {input_scan} -> {output_scan}; '
-            f'block cmd>|{self.command_threshold:.2f}| rad/s or odom>|{self.odom_block_threshold:.2f}| rad/s; '
+            f'block turn requests, cmd>|{self.command_threshold:.2f}| rad/s or odom>|{self.odom_block_threshold:.2f}| rad/s; '
             f'reopen after odom<={self.odom_release_threshold:.2f} rad/s for {self.settle_time:.2f}s.'
         )
 
@@ -95,6 +99,11 @@ class SlamScanGate(Node):
         self.blocked = blocked
         state = 'CLOSED' if blocked else 'OPEN'
         self.get_logger().warning(f'SLAM scan gate {state}: {reason}')
+
+    def _turn_request_cb(self, msg: Float64) -> None:
+        now = time.monotonic()
+        self.last_rotation_seen = now
+        self._set_blocked(True, f'discrete turn request={float(msg.data):+.1f}deg')
 
     def _cmd_cb(self, msg: Twist) -> None:
         now = time.monotonic()
@@ -114,8 +123,6 @@ class SlamScanGate(Node):
             self.last_rotation_seen = now
             self._set_blocked(True, f'odom angular={self.last_odom_angular:+.3f} rad/s')
         elif self.blocked and magnitude > self.odom_release_threshold:
-            # Hysteresis: while already closed, do not start the settling timer
-            # until measured rotation is genuinely small.
             self.last_rotation_seen = now
 
     def _state_timer(self) -> None:
