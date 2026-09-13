@@ -29,78 +29,28 @@ def generate_launch_description():
     command_rate_hz = LaunchConfiguration('command_rate_hz')
     wheel_accel_limit = LaunchConfiguration('wheel_accel_limit')
     wheel_decel_limit = LaunchConfiguration('wheel_decel_limit')
+    publish_tf = LaunchConfiguration('publish_tf')
+    odom_topic = LaunchConfiguration('odom_topic')
+    odom_frame = LaunchConfiguration('odom_frame')
 
     return LaunchDescription([
-        DeclareLaunchArgument(
-            'enable_motion',
-            default_value='false',
-            description='Allow /cmd_vel to command the physical drive motors.',
-        ),
-        DeclareLaunchArgument(
-            'drive_mode',
-            default_value='pwm',
-            description='Drive backend: pwm (validated T=11 raw PWM) or velocity_pid (legacy T=1).',
-        ),
-        DeclareLaunchArgument(
-            'pwm_linear_reference',
-            default_value='40',
-            description='Raw PWM producing the validated straight mapping speed near 0.10-0.12 m/s.',
-        ),
-        DeclareLaunchArgument(
-            'pwm_turn_left',
-            default_value='80',
-            description='Raw PWM magnitude for left/CCW in-place turning.',
-        ),
-        DeclareLaunchArgument(
-            'pwm_turn_right',
-            default_value='80',
-            description='Raw PWM magnitude for right/CW in-place turning.',
-        ),
-        DeclareLaunchArgument(
-            'left_command_scale',
-            default_value='1.0',
-            description='Legacy T=1 left drive gain; ignored in pwm mode.',
-        ),
-        DeclareLaunchArgument(
-            'right_command_scale',
-            default_value='1.0',
-            description='Legacy T=1 right drive gain; ignored in pwm mode.',
-        ),
-        DeclareLaunchArgument(
-            'odom_meters_per_count',
-            default_value='0.0102',
-            description='Calibrated physical scale for cumulative odl/odr counters.',
-        ),
-        DeclareLaunchArgument(
-            'track_width',
-            default_value='0.172',
-            description='Geometric skid-steer track width used in the raw counter yaw model.',
-        ),
-        DeclareLaunchArgument(
-            'odom_yaw_scale_left',
-            default_value='0.447',
-            description='LiDAR-calibrated left/CCW wheel-counter yaw scale from 45 and 90 degree raw-PWM turns.',
-        ),
-        DeclareLaunchArgument(
-            'odom_yaw_scale_right',
-            default_value='0.44',
-            description='LiDAR-calibrated right/CW wheel-counter yaw scale for raw PWM drive.',
-        ),
-        DeclareLaunchArgument(
-            'command_rate_hz',
-            default_value='20.0',
-            description='Motor command refresh rate.',
-        ),
-        DeclareLaunchArgument(
-            'wheel_accel_limit',
-            default_value='0.12',
-            description='Legacy T=1 wheel acceleration limit; ignored in pwm mode.',
-        ),
-        DeclareLaunchArgument(
-            'wheel_decel_limit',
-            default_value='0.18',
-            description='Legacy T=1 wheel deceleration limit; ignored in pwm mode.',
-        ),
+        DeclareLaunchArgument('enable_motion', default_value='false', description='Allow /cmd_vel to command the physical drive motors.'),
+        DeclareLaunchArgument('drive_mode', default_value='pwm', description='Drive backend: pwm or velocity_pid.'),
+        DeclareLaunchArgument('pwm_linear_reference', default_value='40', description='Raw PWM for straight mapping speed.'),
+        DeclareLaunchArgument('pwm_turn_left', default_value='80', description='Raw PWM magnitude for left/CCW in-place turning.'),
+        DeclareLaunchArgument('pwm_turn_right', default_value='80', description='Raw PWM magnitude for right/CW in-place turning.'),
+        DeclareLaunchArgument('left_command_scale', default_value='1.0', description='Legacy T=1 left drive gain; ignored in pwm mode.'),
+        DeclareLaunchArgument('right_command_scale', default_value='1.0', description='Legacy T=1 right drive gain; ignored in pwm mode.'),
+        DeclareLaunchArgument('odom_meters_per_count', default_value='0.0102', description='Calibrated physical scale for cumulative odl/odr counters.'),
+        DeclareLaunchArgument('track_width', default_value='0.172', description='Geometric skid-steer track width.'),
+        DeclareLaunchArgument('odom_yaw_scale_left', default_value='0.447', description='LiDAR-calibrated left/CCW wheel-counter yaw scale.'),
+        DeclareLaunchArgument('odom_yaw_scale_right', default_value='0.44', description='LiDAR-calibrated right/CW wheel-counter yaw scale.'),
+        DeclareLaunchArgument('command_rate_hz', default_value='20.0', description='Motor command refresh rate.'),
+        DeclareLaunchArgument('wheel_accel_limit', default_value='0.12', description='Legacy T=1 wheel acceleration limit.'),
+        DeclareLaunchArgument('wheel_decel_limit', default_value='0.18', description='Legacy T=1 wheel deceleration limit.'),
+        DeclareLaunchArgument('publish_tf', default_value='true', description='Publish odom->base_link TF from the wheel base bridge.'),
+        DeclareLaunchArgument('odom_topic', default_value='/odom', description='Output topic for wheel odometry.'),
+        DeclareLaunchArgument('odom_frame', default_value='odom', description='Frame id written into wheel odometry.'),
         Node(
             package='robot_state_publisher',
             executable='robot_state_publisher',
@@ -113,20 +63,19 @@ def generate_launch_description():
             executable='lidar_node',
             name='rower_lidar',
             output='screen',
-            parameters=[{
-                'serial_port': '/dev/rower_lidar',
-                'frame_id': 'laser',
-            }],
+            parameters=[{'serial_port': '/dev/rower_lidar', 'frame_id': 'laser'}],
         ),
         Node(
             package='rower_base_bridge',
             executable='base_bridge',
             name='rower_base_bridge',
             output='screen',
+            remappings=[('odom', odom_topic)],
             parameters=[{
                 'serial_port': '/dev/rower_base',
                 'base_frame': 'base_link',
-                'odom_frame': 'odom',
+                'odom_frame': ParameterValue(odom_frame, value_type=str),
+                'publish_tf': ParameterValue(publish_tf, value_type=bool),
                 'enable_motion': ParameterValue(enable_motion, value_type=bool),
                 'drive_mode': ParameterValue(drive_mode, value_type=str),
                 'pwm_linear_reference': ParameterValue(pwm_linear_reference, value_type=int),
