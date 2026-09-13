@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import statistics
 import sys
 import time
 
@@ -29,6 +30,9 @@ class FloorStraightProbe(Node):
         self.last_raw = None
         self.first_raw = None
         self.raw_samples = 0
+        self.raw_left_samples = []
+        self.raw_right_samples = []
+        self.voltage_samples = []
 
     @staticmethod
     def _yaw_from_quaternion(q) -> float:
@@ -57,10 +61,27 @@ class FloorStraightProbe(Node):
             odr = float(payload['odr'])
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             return
+
         self.last_raw = (odl, odr)
         if self.first_raw is None:
             self.first_raw = self.last_raw
         self.raw_samples += 1
+
+        try:
+            left = float(payload['L'])
+            right = float(payload['R'])
+            if math.isfinite(left) and math.isfinite(right):
+                self.raw_left_samples.append(left)
+                self.raw_right_samples.append(right)
+        except (KeyError, TypeError, ValueError):
+            pass
+
+        try:
+            voltage = float(payload['v']) / 100.0
+            if math.isfinite(voltage):
+                self.voltage_samples.append(voltage)
+        except (KeyError, TypeError, ValueError):
+            pass
 
     def publish(self, linear_x: float) -> None:
         msg = Twist()
@@ -86,9 +107,32 @@ def angle_diff(a: float, b: float) -> float:
     return math.atan2(math.sin(a - b), math.cos(a - b))
 
 
+def _mean(values: list[float]) -> float:
+    return statistics.fmean(values) if values else math.nan
+
+
+def _pstdev(values: list[float]) -> float:
+    return statistics.pstdev(values) if len(values) >= 2 else 0.0
+
+
+def _imbalance_flips(left: list[float], right: list[float], threshold: float = 0.01) -> int:
+    """Count meaningful L-R dominance changes; many flips are consistent with weaving."""
+    previous = 0
+    flips = 0
+    for lval, rval in zip(left, right):
+        diff = lval - rval
+        current = 1 if diff > threshold else (-1 if diff < -threshold else 0)
+        if current == 0:
+            continue
+        if previous != 0 and current != previous:
+            flips += 1
+        previous = current
+    return flips
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description='Guarded low-speed straight-line floor calibration for the ROS base bridge.'
+        description='Guarded straight-line floor calibration/diagnostic for the ROS base bridge.'
     )
     parser.add_argument('--run', action='store_true', help='Required to allow floor motion.')
     parser.add_argument('--speed', type=float, default=0.06, help='Forward command in m/s (0.03..0.10).')
@@ -143,12 +187,15 @@ def main() -> int:
         node.first_raw = node.last_raw
         node.linear_samples.clear()
         node.angular_samples.clear()
+        node.raw_left_samples.clear()
+        node.raw_right_samples.clear()
+        node.voltage_samples.clear()
         node.samples = 0
         node.raw_samples = 0
 
         spin_for(node, args.seconds, command=args.speed)
 
-        # Explicit stop and collect settling odometry/counters.
+        # Explicit normal stop and collect settling odometry/counters.
         for _ in range(8):
             node.publish(0.0)
             rclpy.spin_once(node, timeout_sec=0.05)
@@ -183,8 +230,6 @@ def main() -> int:
             dl = odl1 - odl0
             dr = odr1 - odr0
             avg_counts = (abs(dl) + abs(dr)) / 2.0
-            # Current Waveshare firmware transmits int(en_odom_* * 100), so one
-            # integer count is nominally 0.01 m before physical scale calibration.
             nominal_counter_distance = avg_counts * 0.01
             print(
                 'RAW_COUNTERS: '
@@ -197,8 +242,33 @@ def main() -> int:
         else:
             print('RAW_COUNTERS: unavailable (update/rebuild rower_base_bridge if needed)')
 
+        if node.raw_left_samples and node.raw_right_samples:
+            mean_l = _mean(node.raw_left_samples)
+            mean_r = _mean(node.raw_right_samples)
+            std_l = _pstdev(node.raw_left_samples)
+            std_r = _pstdev(node.raw_right_samples)
+            diffs = [lval - rval for lval, rval in zip(node.raw_left_samples, node.raw_right_samples)]
+            flips = _imbalance_flips(node.raw_left_samples, node.raw_right_samples)
+            print(
+                'RAW_SPEEDS: '
+                f'n={len(diffs)} '
+                f'L_mean={mean_l:.4f} L_std={std_l:.4f} '
+                f'R_mean={mean_r:.4f} R_std={std_r:.4f} '
+                f'mean_L_minus_R={_mean(diffs):.4f} '
+                f'max_abs_L_minus_R={max((abs(v) for v in diffs), default=0.0):.4f} '
+                f'dominance_flips={flips}'
+            )
+
+        if node.voltage_samples:
+            print(
+                'BATTERY: '
+                f'mean={_mean(node.voltage_samples):.2f}V '
+                f'min={min(node.voltage_samples):.2f}V '
+                f'max={max(node.voltage_samples):.2f}V'
+            )
+
         print('MEASURE: physically measure the robot travel from its start center to finish center.')
-        print('Return the measured distance in mm and whether it visibly pulled left or right.')
+        print('Return the measured distance and describe whether it arcs steadily or weaves left/right.')
         return 0
     finally:
         try:
