@@ -46,8 +46,22 @@ def generate_launch_description():
         output='screen',
     )
 
-    # slam_toolbox is a lifecycle node on ROS 2 Jazzy. Using its official
-    # online_async launch is important: it configures and activates the node.
+    # During map acquisition, map is intentionally the same metric frame as
+    # odom. slam_toolbox is configured with transform_publish_period=0.0, so it
+    # cannot move map->odom underneath the robot while matching scans.
+    map_to_odom_identity = ExecuteProcess(
+        cmd=[
+            'ros2', 'run', 'tf2_ros', 'static_transform_publisher',
+            '--x', '0', '--y', '0', '--z', '0',
+            '--yaw', '0', '--pitch', '0', '--roll', '0',
+            '--frame-id', 'map', '--child-frame-id', 'odom',
+        ],
+        output='screen',
+    )
+
+    # slam_toolbox is a lifecycle node on ROS 2 Jazzy. It now only paints the
+    # occupancy grid at poses supplied by the calibrated odometry; scan matching
+    # and loop-closure pose corrections are disabled in slam_toolbox.yaml.
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(official_online_async),
         launch_arguments={
@@ -64,8 +78,9 @@ def generate_launch_description():
             default_value='false',
             description='Use simulation clock. Keep false on the physical robot.',
         ),
+        map_to_odom_identity,
         scan_gate,
-        # Give the gate and odometry a moment to appear before slam_toolbox
+        # Give fixed TF, gate and odometry a moment to appear before slam_toolbox
         # subscribes to the filtered scan stream.
         TimerAction(period=0.8, actions=[slam]),
     ])
