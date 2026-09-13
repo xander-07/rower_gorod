@@ -32,7 +32,7 @@ git pull
 
 A Docker image rebuild is only required when `docker/Dockerfile` changes. The current motion-smoothing and dashboard changes do not require rebuilding the image.
 
-## Smooth base motion
+## Smooth base motion and validated straight speed
 
 `rower_base_bridge` rate-limits normal left/right wheel commands before sending Waveshare `T=1` packets. Current defaults are:
 
@@ -42,11 +42,20 @@ wheel acceleration: 0.12 m/s^2
 wheel deceleration: 0.18 m/s^2
 ```
 
-At a straight command of `0.06 m/s`, target speed is reached in roughly 0.5 s instead of being applied as one step. Normal zero-velocity commands are also ramped down.
-
 Safety behavior is intentionally different: if `/cmd_vel` becomes stale for more than `0.35 s`, an emergency-stop message arrives on `/base/emergency_stop`, or the ROS node shuts down, the bridge bypasses the ramp and commands an immediate zero. Smooth motion must never weaken the emergency stop.
 
-The final wheel-counter yaw defaults are also aligned with the validated bringup values:
+Long floor tests showed that the chassis is not repeatably stable at a `0.06 m/s` straight command: it can weave and the left/right cumulative counters can diverge strongly even though the final average sometimes looks balanced. At `0.10 m/s` the robot physically drove straight and the cumulative counters were nearly identical (`91` vs `92` counts in the validation run). Therefore mapping should use `0.10 m/s` as the current minimum validated straight speed.
+
+The same floor test also showed that the factory-balanced drive gains are preferable at the validated speed. Normal bringup now defaults to:
+
+```text
+left_command_scale:  1.0
+right_command_scale: 1.0
+```
+
+The earlier `0.965 / 1.035` straight-line correction is no longer the normal default. It may still be supplied explicitly for diagnostics if needed.
+
+The final wheel-counter yaw defaults remain:
 
 ```text
 odom_yaw_scale_left:  0.50
@@ -131,14 +140,14 @@ The dashboard displays live `/map`, current LiDAR returns, robot pose and batter
 
 Browser control starts disarmed after every page load. To use it, the operator must explicitly press `УПРАВЛЕНИЕ ЗАБЛОКИРОВАНО`, after which the button changes to `УПРАВЛЕНИЕ РАЗРЕШЕНО`.
 
-The page intentionally does not combine linear and angular commands. Default mapping speeds are:
+The page intentionally does not combine linear and angular commands. Current mapping defaults are:
 
 ```text
-linear:  0.06 m/s
+linear:  0.10 m/s
 angular: 0.25 rad/s
 ```
 
-The angular control range is deliberately limited to `0.15..0.40 rad/s` for mapping. Fast skid-steer turns distort a rotating LiDAR scan and increase the chance of scan-matching errors.
+The browser intentionally does not offer straight speeds below `0.10 m/s` because `0.06 m/s` produced repeatable weaving in floor testing. The angular mapping range is limited to `0.20..0.40 rad/s`. Fast skid-steer turns distort a rotating LiDAR scan and increase the chance of scan-matching errors.
 
 When a normal movement key/button is released, the page keeps publishing zero velocity briefly so the base bridge has enough time to perform its smooth deceleration. The red `АВАРИЙНЫЙ СТОП` button and the `Space` key publish `/base/emergency_stop`, which bypasses the ramp and immediately forces both wheel commands to zero. Losing browser communication still falls back to the `0.35 s` bridge watchdog.
 
