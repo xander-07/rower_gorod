@@ -15,21 +15,45 @@ RUN --mount=type=secret,id=local_ca,target=/usr/local/share/ca-certificates/rowe
     && apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates \
+       build-essential \
+       cmake \
+       git \
+       libboost-dev \
+       libeigen3-dev \
        python3-colcon-common-extensions \
        python3-rosdep \
        python3-serial \
-       git \
+       ros-jazzy-eigen3-cmake-module \
        ros-jazzy-navigation2 \
        ros-jazzy-nav2-bringup \
        ros-jazzy-slam-toolbox \
-       ros-jazzy-rf2o-laser-odometry \
        ros-jazzy-robot-state-publisher \
+       ros-jazzy-tf2-geometry-msgs \
        ros-jazzy-xacro \
        ros-jazzy-tf2-tools \
        ros-jazzy-teleop-twist-keyboard \
        ros-jazzy-rmw-cyclonedds-cpp \
        ros-jazzy-rosbridge-server \
     && rm -rf /var/lib/apt/lists/*
+
+# RF2O has a ROS 2 branch but is not released as a Jazzy binary package for
+# Ubuntu Noble/arm64. Build the upstream ROS 2 implementation from a pinned
+# commit so Raspberry Pi builds are reproducible instead of depending on a
+# non-existent ros-jazzy-rf2o-laser-odometry apt package.
+RUN mkdir -p /tmp/rf2o_ws/src/rf2o_laser_odometry \
+    && cd /tmp/rf2o_ws/src/rf2o_laser_odometry \
+    && git init \
+    && git remote add origin https://github.com/MAPIRlab/rf2o_laser_odometry.git \
+    && git fetch --depth 1 origin b38c68e46387b98845ecbfeb6660292f967a00d3 \
+    && git checkout --detach FETCH_HEAD \
+    && cd /tmp/rf2o_ws \
+    && . /opt/ros/jazzy/setup.sh \
+    && colcon build \
+         --merge-install \
+         --install-base /opt/rf2o \
+         --packages-select rf2o_laser_odometry \
+         --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    && rm -rf /tmp/rf2o_ws
 
 WORKDIR /workspace/rower_gorod
 
