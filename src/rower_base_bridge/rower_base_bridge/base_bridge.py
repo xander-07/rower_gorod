@@ -21,15 +21,14 @@ import serial
 class RowerBaseBridge(Node):
     """Bridge the Waveshare UGV02 JSON UART protocol to ROS 2.
 
-    Drive commands use Waveshare T=1 left/right velocity control. Pose odometry
-    uses cumulative ``odl`` / ``odr`` counters from T=1001. Pure in-place
-    angular commands and wheel-odometry yaw have separate skid-steer
-    calibrations derived from LiDAR turn tests on the real robot.
+    The empirically validated default drive mode is raw Waveshare PWM (T=11).
+    It bypasses the lower controller's unstable low-speed velocity PID that
+    caused visible left/right weaving with T=1/T=13 on the real six-wheel base.
 
-    Normal requested speed changes are rate-limited in wheel space so starts,
-    stops and direction changes are smoother. The command watchdog, explicit
-    emergency-stop topic and shutdown path deliberately bypass the ramp and
-    stop the base immediately.
+    Pose odometry still comes from cumulative ``odl`` / ``odr`` counters in
+    T=1001 feedback. For the current mapping phase, mixed linear+angular commands
+    are intentionally converted to stop/rotate/straight motion: any meaningful
+    angular command gets priority and becomes an in-place turn.
 
     Motion remains disabled unless ``enable_motion`` is explicitly true.
     """
@@ -49,26 +48,28 @@ class RowerBaseBridge(Node):
         self.declare_parameter('enable_motion', False)
         self.declare_parameter('command_rate_hz', 20.0)
         self.declare_parameter('cmd_timeout', 0.35)
-        self.declare_parameter('max_wheel_speed', 0.25)
 
-        # Wheel-space slew limiting. At the default limits a 0.06 m/s straight
-        # command reaches target in about 0.5 s and normally stops in about
-        # 0.33 s. A stale /cmd_vel still causes an immediate zero command.
+        # Empirical raw-PWM drive path. On the real robot:
+        #   T=11 L=40 R=40 -> straight, counters 14/14, ~0.116 m/s feedback.
+        #   T=11 L=-60 R=60 -> ~+15 deg in 0.6 s.
+        #   T=11 L=60 R=-60 -> real right turns; exact rate varies with slip.
+        self.declare_parameter('drive_mode', 'pwm')
+        self.declare_parameter('pwm_linear_reference_speed', 0.10)
+        self.declare_parameter('pwm_linear_reference', 40)
+        self.declare_parameter('pwm_linear_min', 40)
+        self.declare_parameter('pwm_linear_max', 70)
+        self.declare_parameter('pwm_turn_left', 60)
+        self.declare_parameter('pwm_turn_right', 60)
+        self.declare_parameter('pwm_linear_deadband', 0.02)
+        self.declare_parameter('pwm_angular_deadband', 0.05)
+        self.declare_parameter('pwm_turn_linear_threshold', 0.02)
+
+        # Legacy T=1 velocity-PID path retained only as a fallback diagnostic.
+        self.declare_parameter('max_wheel_speed', 0.25)
         self.declare_parameter('wheel_accel_limit', 0.12)
         self.declare_parameter('wheel_decel_limit', 0.18)
-
-        # Straight-line drivetrain calibration.
-        self.declare_parameter('left_command_scale', 0.965)
-        self.declare_parameter('right_command_scale', 1.035)
-
-        # In-place turn command calibration from LiDAR tests. Before
-        # compensation, measured physical angular speed followed approximately:
-        #   left : omega_real = 0.4804 * omega_raw - 0.1810
-        #   right: omega_real = 0.4523 * omega_raw - 0.1463
-        # Therefore desired physical omega is mapped back to the raw command by
-        # gain * |omega_desired| + offset. This correction is intentionally
-        # limited to near-zero linear velocity because moving arcs have not yet
-        # been separately calibrated.
+        self.declare_parameter('left_command_scale', 1.0)
+        self.declare_parameter('right_command_scale', 1.0)
         self.declare_parameter('angular_compensation_enabled', True)
         self.declare_parameter('angular_compensation_linear_threshold', 0.02)
         self.declare_parameter('angular_command_deadband', 0.03)
@@ -78,10 +79,9 @@ class RowerBaseBridge(Node):
         self.declare_parameter('angular_command_offset_right', 0.3235)
         self.declare_parameter('angular_command_max_raw', 2.50)
 
-        # Wheel counters substantially over-report chassis yaw during skid-steer
-        # turns. Final LiDAR validation supports a symmetric 0.50 scale.
-        self.declare_parameter('odom_yaw_scale_left', 0.50)
-        self.declare_parameter('odom_yaw_scale_right', 0.50)
+        # Raw-PWM LiDAR turn tests support about 0.49 left and 0.44 right.
+        self.declare_parameter('odom_yaw_scale_left', 0.49)
+        self.declare_parameter('odom_yaw_scale_right', 0.44)
 
         self.serial_port = str(self.get_parameter('serial_port').value)
         self.baud = int(self.get_parameter('baud').value)
@@ -95,39 +95,36 @@ class RowerBaseBridge(Node):
         self.enable_motion = bool(self.get_parameter('enable_motion').value)
         self.command_rate_hz = float(self.get_parameter('command_rate_hz').value)
         self.cmd_timeout = float(self.get_parameter('cmd_timeout').value)
+
+        self.drive_mode = str(self.get_parameter('drive_mode').value).strip().lower()
+        self.pwm_linear_reference_speed = float(self.get_parameter('pwm_linear_reference_speed').value)
+        self.pwm_linear_reference = int(self.get_parameter('pwm_linear_reference').value)
+        self.pwm_linear_min = int(self.get_parameter('pwm_linear_min').value)
+        self.pwm_linear_max = int(self.get_parameter('pwm_linear_max').value)
+        self.pwm_turn_left = int(self.get_parameter('pwm_turn_left').value)
+        self.pwm_turn_right = int(self.get_parameter('pwm_turn_right').value)
+        self.pwm_linear_deadband = float(self.get_parameter('pwm_linear_deadband').value)
+        self.pwm_angular_deadband = float(self.get_parameter('pwm_angular_deadband').value)
+        self.pwm_turn_linear_threshold = float(self.get_parameter('pwm_turn_linear_threshold').value)
+
         self.max_wheel_speed = float(self.get_parameter('max_wheel_speed').value)
         self.wheel_accel_limit = float(self.get_parameter('wheel_accel_limit').value)
         self.wheel_decel_limit = float(self.get_parameter('wheel_decel_limit').value)
         self.left_command_scale = float(self.get_parameter('left_command_scale').value)
         self.right_command_scale = float(self.get_parameter('right_command_scale').value)
-
-        self.angular_compensation_enabled = bool(
-            self.get_parameter('angular_compensation_enabled').value
-        )
-        self.angular_compensation_linear_threshold = float(
-            self.get_parameter('angular_compensation_linear_threshold').value
-        )
-        self.angular_command_deadband = float(
-            self.get_parameter('angular_command_deadband').value
-        )
-        self.angular_command_gain_left = float(
-            self.get_parameter('angular_command_gain_left').value
-        )
-        self.angular_command_offset_left = float(
-            self.get_parameter('angular_command_offset_left').value
-        )
-        self.angular_command_gain_right = float(
-            self.get_parameter('angular_command_gain_right').value
-        )
-        self.angular_command_offset_right = float(
-            self.get_parameter('angular_command_offset_right').value
-        )
-        self.angular_command_max_raw = float(
-            self.get_parameter('angular_command_max_raw').value
-        )
+        self.angular_compensation_enabled = bool(self.get_parameter('angular_compensation_enabled').value)
+        self.angular_compensation_linear_threshold = float(self.get_parameter('angular_compensation_linear_threshold').value)
+        self.angular_command_deadband = float(self.get_parameter('angular_command_deadband').value)
+        self.angular_command_gain_left = float(self.get_parameter('angular_command_gain_left').value)
+        self.angular_command_offset_left = float(self.get_parameter('angular_command_offset_left').value)
+        self.angular_command_gain_right = float(self.get_parameter('angular_command_gain_right').value)
+        self.angular_command_offset_right = float(self.get_parameter('angular_command_offset_right').value)
+        self.angular_command_max_raw = float(self.get_parameter('angular_command_max_raw').value)
         self.odom_yaw_scale_left = float(self.get_parameter('odom_yaw_scale_left').value)
         self.odom_yaw_scale_right = float(self.get_parameter('odom_yaw_scale_right').value)
 
+        if self.drive_mode not in ('pwm', 'velocity_pid'):
+            raise ValueError("drive_mode must be 'pwm' or 'velocity_pid'")
         if self.track_width <= 0.0:
             raise ValueError('track_width must be > 0')
         if self.odom_meters_per_count <= 0.0:
@@ -140,12 +137,22 @@ class RowerBaseBridge(Node):
             raise ValueError('command_rate_hz must be > 0')
         if self.cmd_timeout <= 0.0:
             raise ValueError('cmd_timeout must be > 0')
+        if self.pwm_linear_reference_speed <= 0.0:
+            raise ValueError('pwm_linear_reference_speed must be > 0')
+        if not (1 <= self.pwm_linear_reference <= 255):
+            raise ValueError('pwm_linear_reference must be in 1..255')
+        if not (1 <= self.pwm_linear_min <= self.pwm_linear_max <= 255):
+            raise ValueError('require 1 <= pwm_linear_min <= pwm_linear_max <= 255')
+        if not (1 <= self.pwm_turn_left <= 255 and 1 <= self.pwm_turn_right <= 255):
+            raise ValueError('pwm_turn_left/right must be in 1..255')
+        if self.pwm_linear_deadband < 0.0 or self.pwm_angular_deadband < 0.0:
+            raise ValueError('PWM deadbands must be >= 0')
+        if self.pwm_turn_linear_threshold < 0.0:
+            raise ValueError('pwm_turn_linear_threshold must be >= 0')
         if self.max_wheel_speed <= 0.0:
             raise ValueError('max_wheel_speed must be > 0')
-        if self.wheel_accel_limit <= 0.0:
-            raise ValueError('wheel_accel_limit must be > 0')
-        if self.wheel_decel_limit <= 0.0:
-            raise ValueError('wheel_decel_limit must be > 0')
+        if self.wheel_accel_limit <= 0.0 or self.wheel_decel_limit <= 0.0:
+            raise ValueError('wheel accel/decel limits must be > 0')
         if not (0.5 <= self.left_command_scale <= 1.5):
             raise ValueError('left_command_scale must be in 0.5..1.5')
         if not (0.5 <= self.right_command_scale <= 1.5):
@@ -169,12 +176,7 @@ class RowerBaseBridge(Node):
         self.battery_pub = self.create_publisher(BatteryState, 'battery', 10)
         self.raw_feedback_pub = self.create_publisher(String, 'base/raw_feedback', 20)
         self.cmd_sub = self.create_subscription(Twist, 'cmd_vel', self._cmd_vel_cb, 10)
-        self.estop_sub = self.create_subscription(
-            Empty,
-            'base/emergency_stop',
-            self._emergency_stop_cb,
-            10,
-        )
+        self.estop_sub = self.create_subscription(Empty, 'base/emergency_stop', self._emergency_stop_cb, 10)
         self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
 
         self.ser = serial.Serial(self.serial_port, self.baud, timeout=0)
@@ -194,33 +196,40 @@ class RowerBaseBridge(Node):
         self._sent_right = 0.0
         self._last_command_tick = time.monotonic()
         self._motion_warning_sent = False
+        self._mixed_command_warning_sent = False
         self._closed = False
 
-        # moduleType is RAM-only in the Waveshare firmware, so force base-only
-        # mode every time this bridge starts. This does not command the motors.
         self._send_json({'T': 4, 'cmd': 0})
 
         if self.enable_motion:
             self._send_json({'T': 999})
-            self.get_logger().warning(
-                'MOTION ENABLED: cmd_vel will be converted to T=1 wheel-speed commands.'
-            )
+            if self.drive_mode == 'pwm':
+                self.get_logger().warning('MOTION ENABLED: cmd_vel uses raw T=11 PWM; Waveshare speed PID is bypassed.')
+            else:
+                self.get_logger().warning('MOTION ENABLED: legacy T=1 velocity-PID mode is active.')
         else:
-            self.get_logger().info(
-                'Motion is DISABLED (enable_motion:=false). Telemetry/odometry only.'
-            )
+            self.get_logger().info('Motion is DISABLED (enable_motion:=false). Telemetry/odometry only.')
 
         self.create_timer(0.01, self._read_serial)
         self.create_timer(1.0 / self.command_rate_hz, self._command_timer)
 
+        if self.drive_mode == 'pwm':
+            drive_details = (
+                f'PWM straight ref={self.pwm_linear_reference}@{self.pwm_linear_reference_speed:.3f}m/s '
+                f'range={self.pwm_linear_min}..{self.pwm_linear_max}; '
+                f'turn L={self.pwm_turn_left} R={self.pwm_turn_right}'
+            )
+        else:
+            drive_details = (
+                f'T=1 scales L={self.left_command_scale:.3f} R={self.right_command_scale:.3f}; '
+                f'slew accel={self.wheel_accel_limit:.3f} decel={self.wheel_decel_limit:.3f}m/s^2'
+            )
+
         self.get_logger().info(
-            f'Opened {self.serial_port} at {self.baud} baud; '
-            f'track_width={self.track_width:.3f} m; '
-            f'odom_scale={self.odom_meters_per_count:.5f} m/count; '
-            f'drive_scales L={self.left_command_scale:.3f} R={self.right_command_scale:.3f}; '
-            f'yaw_scales L={self.odom_yaw_scale_left:.3f} R={self.odom_yaw_scale_right:.3f}; '
-            f'wheel_slew accel={self.wheel_accel_limit:.3f} decel={self.wheel_decel_limit:.3f} m/s^2; '
-            f'angular_compensation={"on" if self.angular_compensation_enabled else "off"}'
+            f'Opened {self.serial_port} at {self.baud} baud; drive_mode={self.drive_mode}; '
+            f'{drive_details}; track_width={self.track_width:.3f}m; '
+            f'odom_scale={self.odom_meters_per_count:.5f}m/count; '
+            f'yaw_scales L={self.odom_yaw_scale_left:.3f} R={self.odom_yaw_scale_right:.3f}'
         )
 
     def _send_json(self, payload: dict) -> None:
@@ -233,49 +242,61 @@ class RowerBaseBridge(Node):
         self._cmd_angular = float(msg.angular.z)
         self._last_cmd_time = time.monotonic()
         if not self.enable_motion and not self._motion_warning_sent:
-            self.get_logger().warning(
-                'cmd_vel received but motion is disabled. Restart with '
-                '-p enable_motion:=true only when you are ready to move the robot.'
-            )
+            self.get_logger().warning('cmd_vel received but motion is disabled. Restart with enable_motion:=true only when ready.')
             self._motion_warning_sent = True
 
+    def _send_motor_stop(self) -> None:
+        self._sent_left = 0.0
+        self._sent_right = 0.0
+        if self.drive_mode == 'pwm':
+            self._send_json({'T': 11, 'L': 0, 'R': 0})
+        else:
+            self._send_json({'T': 1, 'L': 0.0, 'R': 0.0})
+
     def _emergency_stop_cb(self, _msg: Empty) -> None:
-        """Immediately zero the wheels without disabling future commands."""
         if not self.enable_motion or self._closed:
             return
         self._cmd_linear = 0.0
         self._cmd_angular = 0.0
         self._last_cmd_time = time.monotonic()
-        self._sent_left = 0.0
-        self._sent_right = 0.0
         try:
-            self._send_json({'T': 1, 'L': 0.0, 'R': 0.0})
-            self.get_logger().warning('EMERGENCY STOP: wheel commands forced to zero.')
+            self._send_motor_stop()
+            self.get_logger().warning('EMERGENCY STOP: motor command forced to zero.')
         except serial.SerialException:
             pass
 
+    def _pwm_for_linear_speed(self, linear: float) -> int:
+        magnitude = abs(linear)
+        if magnitude < self.pwm_linear_deadband:
+            return 0
+        raw = int(round(self.pwm_linear_reference * magnitude / self.pwm_linear_reference_speed))
+        raw = max(self.pwm_linear_min, min(self.pwm_linear_max, raw))
+        return raw if linear > 0.0 else -raw
+
+    def _pwm_command(self, linear: float, angular: float) -> tuple[int, int]:
+        if abs(angular) >= self.pwm_angular_deadband:
+            if abs(linear) > self.pwm_turn_linear_threshold and not self._mixed_command_warning_sent:
+                self.get_logger().warning('Mixed linear+angular cmd_vel in PWM mapping mode: linear is ignored; turning in place.')
+                self._mixed_command_warning_sent = True
+            if angular > 0.0:
+                return -self.pwm_turn_left, self.pwm_turn_left
+            return self.pwm_turn_right, -self.pwm_turn_right
+        pwm = self._pwm_for_linear_speed(linear)
+        return pwm, pwm
+
     def _calibrated_angular_command(self, linear: float, angular: float) -> float:
-        """Map desired in-place chassis yaw rate to the raw skid-steer command."""
         if not self.angular_compensation_enabled:
             return angular
         if abs(linear) > self.angular_compensation_linear_threshold:
             return angular
         if abs(angular) < self.angular_command_deadband:
             return 0.0
-
         magnitude = abs(angular)
         if angular > 0.0:
-            raw = (
-                self.angular_command_gain_left * magnitude
-                + self.angular_command_offset_left
-            )
+            raw = self.angular_command_gain_left * magnitude + self.angular_command_offset_left
         else:
-            raw = (
-                self.angular_command_gain_right * magnitude
-                + self.angular_command_offset_right
-            )
-        raw = min(raw, self.angular_command_max_raw)
-        return math.copysign(raw, angular)
+            raw = self.angular_command_gain_right * magnitude + self.angular_command_offset_right
+        return math.copysign(min(raw, self.angular_command_max_raw), angular)
 
     def _yaw_scale(self, raw_dtheta: float) -> float:
         if raw_dtheta > 0.0:
@@ -286,20 +307,14 @@ class RowerBaseBridge(Node):
 
     @staticmethod
     def _slew_wheel(current: float, target: float, dt: float, accel: float, decel: float) -> float:
-        """Rate-limit one wheel command without jumping through zero on reversal."""
         if dt <= 0.0 or current == target:
             return target
-
-        # Reversal first decelerates to zero. The opposite direction begins on a
-        # later timer tick, which avoids a single-command sign flip.
         if current * target < 0.0:
             step = decel * dt
             if abs(current) <= step:
                 return 0.0
             return current - math.copysign(step, current)
-
-        speeding_up = abs(target) > abs(current)
-        limit = accel if speeding_up else decel
+        limit = accel if abs(target) > abs(current) else decel
         step = limit * dt
         delta = target - current
         if abs(delta) <= step:
@@ -309,52 +324,31 @@ class RowerBaseBridge(Node):
     def _command_timer(self) -> None:
         if not self.enable_motion or self._closed:
             return
-
         now = time.monotonic()
         dt = max(0.0, min(0.25, now - self._last_command_tick))
         self._last_command_tick = now
-
         stale = self._last_cmd_time is None or (now - self._last_cmd_time) > self.cmd_timeout
         if stale:
-            # Safety path: stale command means immediate motor stop. Do not ramp.
-            self._sent_left = 0.0
-            self._sent_right = 0.0
-            self._send_json({'T': 1, 'L': 0.0, 'R': 0.0})
+            self._send_motor_stop()
             return
 
         linear = self._cmd_linear
         angular = self._cmd_angular
-        calibrated_angular = self._calibrated_angular_command(linear, angular)
+        if self.drive_mode == 'pwm':
+            left_pwm, right_pwm = self._pwm_command(linear, angular)
+            self._sent_left = float(left_pwm)
+            self._sent_right = float(right_pwm)
+            self._send_json({'T': 11, 'L': left_pwm, 'R': right_pwm})
+            return
 
-        target_left = (
-            linear - calibrated_angular * self.track_width / 2.0
-        ) * self.left_command_scale
-        target_right = (
-            linear + calibrated_angular * self.track_width / 2.0
-        ) * self.right_command_scale
+        calibrated_angular = self._calibrated_angular_command(linear, angular)
+        target_left = (linear - calibrated_angular * self.track_width / 2.0) * self.left_command_scale
+        target_right = (linear + calibrated_angular * self.track_width / 2.0) * self.right_command_scale
         target_left = max(-self.max_wheel_speed, min(self.max_wheel_speed, target_left))
         target_right = max(-self.max_wheel_speed, min(self.max_wheel_speed, target_right))
-
-        self._sent_left = self._slew_wheel(
-            self._sent_left,
-            target_left,
-            dt,
-            self.wheel_accel_limit,
-            self.wheel_decel_limit,
-        )
-        self._sent_right = self._slew_wheel(
-            self._sent_right,
-            target_right,
-            dt,
-            self.wheel_accel_limit,
-            self.wheel_decel_limit,
-        )
-
-        self._send_json({
-            'T': 1,
-            'L': round(self._sent_left, 4),
-            'R': round(self._sent_right, 4),
-        })
+        self._sent_left = self._slew_wheel(self._sent_left, target_left, dt, self.wheel_accel_limit, self.wheel_decel_limit)
+        self._sent_right = self._slew_wheel(self._sent_right, target_right, dt, self.wheel_accel_limit, self.wheel_decel_limit)
+        self._send_json({'T': 1, 'L': round(self._sent_left, 4), 'R': round(self._sent_right, 4)})
 
     def _read_serial(self) -> None:
         if self._closed:
@@ -362,7 +356,6 @@ class RowerBaseBridge(Node):
         waiting = self.ser.in_waiting
         if waiting <= 0:
             return
-
         self._rx_buffer.extend(self.ser.read(waiting))
         while b'\n' in self._rx_buffer:
             raw, _, remainder = self._rx_buffer.partition(b'\n')
@@ -387,56 +380,41 @@ class RowerBaseBridge(Node):
         return result if math.isfinite(result) else None
 
     def _counter_twist(self, now_mono: float, odl: float, odr: float) -> tuple[float, float]:
-        """Estimate velocity from a rolling window of cumulative counters."""
         self._counter_history.append((now_mono, odl, odr))
         cutoff = now_mono - self.twist_window_sec
         while len(self._counter_history) > 2 and self._counter_history[1][0] <= cutoff:
             self._counter_history.popleft()
-
         if len(self._counter_history) < 2:
             return 0.0, 0.0
-
         t0, odl0, odr0 = self._counter_history[0]
         dt = now_mono - t0
         if dt <= 0.05:
             return 0.0, 0.0
-
         dl = (odl - odl0) * self.odom_meters_per_count
         dr = (odr - odr0) * self.odom_meters_per_count
         linear = (dl + dr) / (2.0 * dt)
         raw_angular = (dr - dl) / (self.track_width * dt)
-        angular = raw_angular * self._yaw_scale(raw_angular)
-        return linear, angular
+        return linear, raw_angular * self._yaw_scale(raw_angular)
 
     def _handle_base_feedback(self, msg: dict) -> None:
         left = self._finite_float(msg.get('L'))
         right = self._finite_float(msg.get('R'))
         if left is None or right is None:
             return
-
         odl = self._finite_float(msg.get('odl'))
         odr = self._finite_float(msg.get('odr'))
 
-        raw_feedback = {
-            'L': left,
-            'R': right,
-            'odl': msg.get('odl'),
-            'odr': msg.get('odr'),
-            'v': msg.get('v'),
-        }
         raw_msg = String()
-        raw_msg.data = json.dumps(raw_feedback, separators=(',', ':'))
+        raw_msg.data = json.dumps({'L': left, 'R': right, 'odl': msg.get('odl'), 'odr': msg.get('odr'), 'v': msg.get('v')}, separators=(',', ':'))
         self.raw_feedback_pub.publish(raw_msg)
 
         now_mono = time.monotonic()
         linear = 0.0
         angular = 0.0
-
         if odl is not None and odr is not None:
             if self._last_counter_left is not None and self._last_counter_right is not None:
                 dcl = odl - self._last_counter_left
                 dcr = odr - self._last_counter_right
-
                 if abs(dcl) <= self.counter_step_limit and abs(dcr) <= self.counter_step_limit:
                     dl = dcl * self.odom_meters_per_count
                     dr = dcr * self.odom_meters_per_count
@@ -446,17 +424,10 @@ class RowerBaseBridge(Node):
                     yaw_mid = self._yaw + dtheta * 0.5
                     self._x += ds * math.cos(yaw_mid)
                     self._y += ds * math.sin(yaw_mid)
-                    self._yaw = math.atan2(
-                        math.sin(self._yaw + dtheta),
-                        math.cos(self._yaw + dtheta),
-                    )
+                    self._yaw = math.atan2(math.sin(self._yaw + dtheta), math.cos(self._yaw + dtheta))
                 else:
-                    self.get_logger().warning(
-                        f'Ignoring implausible odometer counter jump: '
-                        f'dL={dcl:.1f} dR={dcr:.1f}'
-                    )
+                    self.get_logger().warning(f'Ignoring implausible odometer counter jump: dL={dcl:.1f} dR={dcr:.1f}')
                     self._counter_history.clear()
-
             self._last_counter_left = odl
             self._last_counter_right = odr
             linear, angular = self._counter_twist(now_mono, odl, odr)
@@ -468,7 +439,6 @@ class RowerBaseBridge(Node):
         stamp = self.get_clock().now().to_msg()
         qz = math.sin(self._yaw / 2.0)
         qw = math.cos(self._yaw / 2.0)
-
         odom = Odometry()
         odom.header.stamp = stamp
         odom.header.frame_id = self.odom_frame
@@ -479,9 +449,6 @@ class RowerBaseBridge(Node):
         odom.pose.pose.orientation.w = qw
         odom.twist.twist.linear.x = linear
         odom.twist.twist.angular.z = angular
-
-        # Wheel yaw is skid-sensitive, so retain a deliberately conservative
-        # yaw covariance even after empirical scaling.
         odom.pose.covariance[0] = 0.03
         odom.pose.covariance[7] = 0.03
         odom.pose.covariance[35] = 0.20
@@ -506,7 +473,6 @@ class RowerBaseBridge(Node):
             voltage = float(raw_v) / 100.0
         except (TypeError, ValueError):
             voltage = math.nan
-
         battery = BatteryState()
         battery.header.stamp = stamp
         battery.voltage = voltage
@@ -527,9 +493,7 @@ class RowerBaseBridge(Node):
             return
         if self.enable_motion:
             try:
-                self._sent_left = 0.0
-                self._sent_right = 0.0
-                self._send_json({'T': 1, 'L': 0.0, 'R': 0.0})
+                self._send_motor_stop()
                 self._send_json({'T': 0})
             except serial.SerialException:
                 pass
