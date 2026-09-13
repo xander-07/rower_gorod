@@ -88,7 +88,7 @@ class MappingTurnController(Node):
         self.started_at = 0.0
         self.settle_until = 0.0
         self.max_progress_deg = 0.0
-        self._publishing_own_estop = False
+        self.ignore_estop_until = 0.0
 
         self.create_timer(1.0 / self.rate_hz, self._timer)
         self._publish_state(False)
@@ -120,11 +120,11 @@ class MappingTurnController(Node):
         self.state_pub.publish(msg)
 
     def _send_estop(self) -> None:
-        self._publishing_own_estop = True
-        try:
-            self.estop_pub.publish(Empty())
-        finally:
-            self._publishing_own_estop = False
+        # ROS delivers our own published message asynchronously. Ignore any
+        # emergency-stop callback arriving in the next short interval so the
+        # controller remains in SETTLING instead of cancelling itself.
+        self.ignore_estop_until = max(self.ignore_estop_until, time.monotonic() + 0.20)
+        self.estop_pub.publish(Empty())
 
     def _odom_is_fresh(self, now: float) -> bool:
         return (
@@ -172,7 +172,8 @@ class MappingTurnController(Node):
         )
 
     def _external_estop_cb(self, _msg: Empty) -> None:
-        if self._publishing_own_estop:
+        now = time.monotonic()
+        if now <= self.ignore_estop_until:
             return
         if self.phase != 'IDLE':
             self.get_logger().warning('TURN CANCELLED by emergency stop.')
@@ -182,9 +183,9 @@ class MappingTurnController(Node):
 
     def _begin_settle(self, now: float, reason: str) -> None:
         self._publish_twist(0.0)
-        self._send_estop()
         self.phase = 'SETTLING'
         self.settle_until = now + self.settle_time
+        self._send_estop()
         self.get_logger().warning(reason)
 
     def _timer(self) -> None:
