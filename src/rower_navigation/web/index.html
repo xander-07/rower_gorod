@@ -48,7 +48,7 @@
     main {
       min-height: 0;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 280px;
+      grid-template-columns: minmax(0, 1fr) 300px;
     }
 
     #mapWrap { position: relative; min-width: 0; min-height: 0; background: #0c0f13; }
@@ -120,6 +120,7 @@
       cursor: pointer;
     }
     .pad button:active { background: #334252; }
+    .pad button:disabled { opacity: .45; cursor: not-allowed; }
     .pad .forward { grid-column: 2; }
     .pad .left { grid-column: 1; grid-row: 2; }
     .pad .back { grid-column: 2; grid-row: 2; }
@@ -129,6 +130,8 @@
     input[type="range"] { width: 100%; }
     .small { font-size: 12px; line-height: 1.45; color: var(--muted); }
     .keys { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: #dfe8ef; }
+    .turn-ok { color: var(--ok); }
+    .turn-busy { color: var(--warn); }
 
     @media (max-width: 820px) {
       main { grid-template-columns: 1fr; grid-template-rows: minmax(340px, 1fr) auto; }
@@ -158,32 +161,29 @@
         <div class="row"><span>Позиция</span><strong id="poseInfo">—</strong></div>
         <div class="row"><span>LiDAR</span><strong id="scanInfo">—</strong></div>
         <div class="row"><span>Батарея</span><strong id="batteryInfo">—</strong></div>
+        <div class="row"><span>Поворот</span><strong id="turnInfo" class="turn-ok">готов</strong></div>
       </div>
 
       <div class="section">
         <h2>Ручное управление картографированием</h2>
         <button id="armBtn" class="arm">УПРАВЛЕНИЕ ЗАБЛОКИРОВАНО</button>
-        <div class="small">Кнопка выше — дополнительный предохранитель браузера. Движение всё равно возможно только если ROS запущен с <span class="keys">enable_motion:=true</span>.</div>
+        <div class="small">Кнопка выше — дополнительный предохранитель браузера. Движение возможно только если ROS запущен с <span class="keys">enable_motion:=true</span>.</div>
 
         <button id="stopBtn" class="stop">АВАРИЙНЫЙ СТОП</button>
 
         <div class="pad">
           <button class="forward" data-cmd="forward">↑</button>
-          <button class="left" data-cmd="left">↶</button>
+          <button class="left" data-turn="15">↶ 15°</button>
           <button class="back" data-cmd="back">↓</button>
-          <button class="right" data-cmd="right">↷</button>
+          <button class="right" data-turn="-15">15° ↷</button>
         </div>
 
         <label>Линейная скорость: <strong id="linearValue">0.10</strong> м/с</label>
         <input id="linearSpeed" type="range" min="0.10" max="0.12" step="0.01" value="0.10" />
 
-        <label>Угловая скорость: <strong id="angularValue">0.25</strong> рад/с</label>
-        <input id="angularSpeed" type="range" min="0.20" max="0.40" step="0.05" value="0.25" />
-
-        <p class="small">0.10 м/с — проверенная стабильная скорость прямого хода. На 0.06 м/с база шла змейкой, поэтому низкие скорости для картографирования отключены.</p>
-        <p class="small">Для чистой карты: прямая → остановка 0.5–1 с → медленный поворот на месте → остановка 0.5–1 с → прямая. Дуги намеренно отключены.</p>
-        <p class="small">Отпускание клавиши — плавное торможение. <span class="keys">Space</span> или красная кнопка — немедленный аварийный стоп.</p>
-        <p class="small">Клавиши: <span class="keys">W/↑</span> вперёд, <span class="keys">S/↓</span> назад, <span class="keys">A/←</span> поворот влево, <span class="keys">D/→</span> вправо.</p>
+        <p class="small">Повороты больше не выполняются удержанием клавиши. Каждый <span class="keys">A/←</span> или <span class="keys">D/→</span> запускает замкнутый поворот на 15° по одометрии. <span class="keys">Shift+A/D</span> — точный поворот на 90°.</p>
+        <p class="small">Во время поворота LiDAR-сканы для SLAM блокируются. После остановки робот выдерживает паузу и только затем снова разрешает движение.</p>
+        <p class="small">Прямой ход: <span class="keys">W/↑</span> и <span class="keys">S/↓</span> удерживаются как раньше. Отпускание даёт команду нулевой скорости. <span class="keys">Space</span> или красная кнопка — немедленный аварийный стоп.</p>
       </div>
     </aside>
   </main>
@@ -201,12 +201,11 @@
     const poseInfo = document.getElementById('poseInfo');
     const scanInfo = document.getElementById('scanInfo');
     const batteryInfo = document.getElementById('batteryInfo');
+    const turnInfo = document.getElementById('turnInfo');
     const armBtn = document.getElementById('armBtn');
     const stopBtn = document.getElementById('stopBtn');
     const linearSpeed = document.getElementById('linearSpeed');
-    const angularSpeed = document.getElementById('angularSpeed');
     const linearValue = document.getElementById('linearValue');
-    const angularValue = document.getElementById('angularValue');
 
     hostBadge.textContent = `robot: ${location.hostname}`;
 
@@ -221,9 +220,11 @@
     let armed = false;
     let activeCmd = null;
     let zeroHoldUntil = 0;
+    let turnActive = false;
 
-    // Validated URDF fallback. /tf_static replaces this as soon as it arrives.
-    let baseToLaser = { x: 0.040, y: 0.0, yaw: Math.PI / 2 };
+    // Empirically validated LiDAR mounting fallback. /tf_static replaces this
+    // as soon as the robot_state_publisher transform arrives.
+    let baseToLaser = { x: 0.040, y: 0.0, yaw: -Math.PI / 2 };
 
     function normFrame(name) {
       return String(name || '').replace(/^\/+/, '');
@@ -271,6 +272,14 @@
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
     }
 
+    function updateTurnUi() {
+      turnInfo.textContent = turnActive ? 'выполняется…' : 'готов';
+      turnInfo.className = turnActive ? 'turn-busy' : 'turn-ok';
+      for (const btn of document.querySelectorAll('.pad button')) {
+        btn.disabled = turnActive;
+      }
+    }
+
     function connect() {
       clearTimeout(reconnectTimer);
       setBadge(wsBadge, 'ROS: подключение…', 'warn');
@@ -281,6 +290,7 @@
         setBadge(wsBadge, 'ROS: подключено', 'ok');
         send({ op: 'advertise', topic: '/cmd_vel', type: 'geometry_msgs/msg/Twist' });
         send({ op: 'advertise', topic: '/base/emergency_stop', type: 'std_msgs/msg/Empty' });
+        send({ op: 'advertise', topic: '/mapping/turn_angle_deg', type: 'std_msgs/msg/Float64' });
         // Keep the browser useful without making rosbridge mirror every high-rate
         // sample. SLAM itself still receives ROS topics directly.
         subscribe('/map', 1000);
@@ -289,6 +299,7 @@
         subscribe('/tf', 100);
         subscribe('/tf_static', 0);
         subscribe('/battery', 500);
+        subscribe('/mapping/turn_active', 50);
       };
 
       ws.onmessage = (event) => {
@@ -313,6 +324,13 @@
         } else if (packet.topic === '/battery') {
           const v = Number(msg.voltage);
           if (Number.isFinite(v)) batteryVoltage = v;
+        } else if (packet.topic === '/mapping/turn_active') {
+          turnActive = Boolean(msg.data);
+          if (turnActive) {
+            activeCmd = null;
+            zeroHoldUntil = 0;
+          }
+          updateTurnUi();
         }
       };
 
@@ -321,7 +339,9 @@
         armed = false;
         activeCmd = null;
         zeroHoldUntil = 0;
+        turnActive = false;
         updateArmButton();
+        updateTurnUi();
         reconnectTimer = setTimeout(connect, 2000);
       };
 
@@ -432,7 +452,6 @@
 
       const robot = robotMapPose();
       if (robot) {
-        // Current LiDAR points transformed through base_link into map.
         if (scanMsg && Array.isArray(scanMsg.ranges)) {
           const laser = compose(robot, baseToLaser);
           ctx.fillStyle = '#2c8fff';
@@ -473,17 +492,7 @@
       requestAnimationFrame(render);
     }
 
-    function twistFor(cmd) {
-      const lin = Number(linearSpeed.value);
-      const ang = Number(angularSpeed.value);
-      if (cmd === 'forward') return { linear: lin, angular: 0 };
-      if (cmd === 'back') return { linear: -lin, angular: 0 };
-      if (cmd === 'left') return { linear: 0, angular: ang };
-      if (cmd === 'right') return { linear: 0, angular: -ang };
-      return { linear: 0, angular: 0 };
-    }
-
-    function publishTwist(linear, angular) {
+    function publishTwist(linear, angular = 0) {
       send({
         op: 'publish',
         topic: '/cmd_vel',
@@ -494,35 +503,44 @@
       });
     }
 
-    function stopMotion() {
+    function startLinear(direction) {
+      if (!armed || turnActive || !ws || ws.readyState !== WebSocket.OPEN) return;
+      zeroHoldUntil = 0;
+      activeCmd = direction;
+      const lin = Number(linearSpeed.value) * (direction === 'forward' ? 1 : -1);
+      publishTwist(lin, 0);
+    }
+
+    function stopLinear() {
       activeCmd = null;
-      // Keep publishing zero briefly so the base bridge can perform its normal
-      // smooth deceleration instead of reaching the command watchdog timeout.
-      zeroHoldUntil = performance.now() + 800;
+      zeroHoldUntil = performance.now() + 350;
       publishTwist(0, 0);
+    }
+
+    function requestTurn(angleDeg) {
+      if (!armed || turnActive || !ws || ws.readyState !== WebSocket.OPEN) return;
+      activeCmd = null;
+      zeroHoldUntil = 0;
+      publishTwist(0, 0);
+      send({
+        op: 'publish',
+        topic: '/mapping/turn_angle_deg',
+        msg: { data: Number(angleDeg) }
+      });
     }
 
     function emergencyStop() {
       activeCmd = null;
       zeroHoldUntil = 0;
       send({ op: 'publish', topic: '/base/emergency_stop', msg: {} });
-      // Also send /cmd_vel zero for compatibility and to keep the desired state zero.
       publishTwist(0, 0);
     }
 
-    function startMotion(cmd) {
-      if (!armed || !ws || ws.readyState !== WebSocket.OPEN) return;
-      zeroHoldUntil = 0;
-      activeCmd = cmd;
-      const t = twistFor(cmd);
-      publishTwist(t.linear, t.angular);
-    }
-
     setInterval(() => {
-      if (!armed || !ws || ws.readyState !== WebSocket.OPEN) return;
-      if (activeCmd) {
-        const t = twistFor(activeCmd);
-        publishTwist(t.linear, t.angular);
+      if (!armed || turnActive || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (activeCmd === 'forward' || activeCmd === 'back') {
+        const sign = activeCmd === 'forward' ? 1 : -1;
+        publishTwist(sign * Number(linearSpeed.value), 0);
       } else if (performance.now() < zeroHoldUntil) {
         publishTwist(0, 0);
       }
@@ -542,19 +560,25 @@
     stopBtn.addEventListener('click', () => emergencyStop());
 
     for (const btn of document.querySelectorAll('.pad button')) {
+      if (btn.dataset.turn) {
+        btn.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          requestTurn(Number(btn.dataset.turn));
+        });
+        btn.addEventListener('contextmenu', (e) => e.preventDefault());
+        continue;
+      }
+
       const cmd = btn.dataset.cmd;
-      btn.addEventListener('pointerdown', (e) => { e.preventDefault(); btn.setPointerCapture?.(e.pointerId); startMotion(cmd); });
-      btn.addEventListener('pointerup', (e) => { e.preventDefault(); stopMotion(); });
-      btn.addEventListener('pointercancel', stopMotion);
+      btn.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        btn.setPointerCapture?.(e.pointerId);
+        startLinear(cmd);
+      });
+      btn.addEventListener('pointerup', (e) => { e.preventDefault(); stopLinear(); });
+      btn.addEventListener('pointercancel', stopLinear);
       btn.addEventListener('contextmenu', (e) => e.preventDefault());
     }
-
-    const keyToCmd = {
-      w: 'forward', arrowup: 'forward',
-      s: 'back', arrowdown: 'back',
-      a: 'left', arrowleft: 'left',
-      d: 'right', arrowright: 'right'
-    };
 
     window.addEventListener('keydown', (e) => {
       const key = e.key.toLowerCase();
@@ -563,17 +587,38 @@
         emergencyStop();
         return;
       }
-      const cmd = keyToCmd[key];
-      if (!cmd || e.repeat) return;
-      e.preventDefault();
-      startMotion(cmd);
+      if (e.repeat) return;
+
+      if (key === 'w' || key === 'arrowup') {
+        e.preventDefault();
+        startLinear('forward');
+        return;
+      }
+      if (key === 's' || key === 'arrowdown') {
+        e.preventDefault();
+        startLinear('back');
+        return;
+      }
+      if (key === 'a' || key === 'arrowleft') {
+        e.preventDefault();
+        requestTurn(e.shiftKey ? 90 : 15);
+        return;
+      }
+      if (key === 'd' || key === 'arrowright') {
+        e.preventDefault();
+        requestTurn(e.shiftKey ? -90 : -15);
+      }
     });
 
     window.addEventListener('keyup', (e) => {
-      const cmd = keyToCmd[e.key.toLowerCase()];
-      if (cmd && activeCmd === cmd) {
+      const key = e.key.toLowerCase();
+      if ((key === 'w' || key === 'arrowup') && activeCmd === 'forward') {
         e.preventDefault();
-        stopMotion();
+        stopLinear();
+      }
+      if ((key === 's' || key === 'arrowdown') && activeCmd === 'back') {
+        e.preventDefault();
+        stopLinear();
       }
     });
 
@@ -582,9 +627,9 @@
     document.addEventListener('visibilitychange', () => { if (document.hidden) emergencyStop(); });
 
     linearSpeed.addEventListener('input', () => linearValue.textContent = Number(linearSpeed.value).toFixed(2));
-    angularSpeed.addEventListener('input', () => angularValue.textContent = Number(angularSpeed.value).toFixed(2));
 
     updateArmButton();
+    updateTurnUi();
     connect();
     requestAnimationFrame(render);
   </script>
