@@ -40,6 +40,31 @@ def generate_launch_description():
         }.items(),
     )
 
+    # The workspace is bind-mounted at this stable path by run_ros2_docker.sh.
+    # Run the mapping turn helper directly so a newly added script does not
+    # depend on an already-configured colcon libexec overlay.
+    turn_controller_script = '/workspace/rower_gorod/src/rower_navigation/scripts/turn_controller.py'
+    turn_controller = ExecuteProcess(
+        cmd=[
+            'python3', turn_controller_script,
+            '--ros-args',
+            '-r', '__node:=rower_mapping_turn_controller',
+            '-p', 'request_topic:=/mapping/turn_angle_deg',
+            '-p', 'state_topic:=/mapping/turn_active',
+            '-p', 'cmd_vel_topic:=/cmd_vel',
+            '-p', 'odom_topic:=/odom',
+            '-p', 'emergency_topic:=/base/emergency_stop',
+            '-p', 'angular_command:=0.40',
+            '-p', 'left_stop_margin_deg:=3.0',
+            '-p', 'right_stop_margin_deg:=2.0',
+            '-p', 'control_rate_hz:=50.0',
+            '-p', 'odom_timeout_sec:=0.20',
+            '-p', 'turn_timeout_sec:=8.0',
+            '-p', 'settle_time_sec:=0.70',
+        ],
+        output='screen',
+    )
+
     # Local-only browser dashboard transport. No cloud/external website is
     # required: the browser connects directly to the Raspberry Pi.
     rosbridge = Node(
@@ -92,6 +117,7 @@ def generate_launch_description():
             description='WebSocket port used by the local dashboard.',
         ),
         robot_launch,
+        turn_controller,
         rosbridge,
         web_server,
         # Give LiDAR, odometry and static TF a moment to appear before SLAM.
