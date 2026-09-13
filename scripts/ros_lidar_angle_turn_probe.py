@@ -6,21 +6,26 @@ import json
 import math
 import statistics
 import sys
+import threading
 import time
 
 import rclpy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String
+from std_msgs.msg import Empty, String
 
 
 class AngleTurnProbe(Node):
-    def __init__(self, rate_hz: float) -> None:
+    def __init__(self) -> None:
         super().__init__('rower_lidar_angle_turn_probe')
-        self.rate_hz = rate_hz
-        self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
+
+        # Keep command history minimal: stale non-zero cmd_vel messages are
+        # especially undesirable when we are stopping on a precise yaw target.
+        self.pub = self.create_publisher(Twist, '/cmd_vel', 1)
+        self.estop_pub = self.create_publisher(Empty, '/base/emergency_stop', 1)
         self.create_subscription(LaserScan, '/scan', self._scan_cb, 10)
         self.create_subscription(Odometry, '/odom', self._odom_cb, 20)
         self.create_subscription(String, '/base/raw_feedback', self._raw_cb, 20)
@@ -29,6 +34,7 @@ class AngleTurnProbe(Node):
         self.scan_increment: float | None = None
         self.scan_seq = 0
         self.latest_pose: tuple[float, float, float] | None = None
+        self.latest_pose_mono: float | None = None
         self.latest_raw: tuple[float, float] | None = None
 
     @staticmethod
@@ -49,6 +55,7 @@ class AngleTurnProbe(Node):
             float(p.position.y),
             self._yaw(p.orientation),
         )
+        self.latest_pose_mono = time.monotonic()
 
     def _raw_cb(self, msg: String) -> None:
         try:
@@ -63,6 +70,9 @@ class AngleTurnProbe(Node):
         msg.angular.z = float(angular_z)
         self.pub.publish(msg)
 
+    def emergency_stop(self) -> None:
+        self.estop_pub.publish(Empty())
+
 
 def angle_diff(a: float, b: float) -> float:
     return math.atan2(math.sin(a - b), math.cos(a - b))
@@ -73,10 +83,10 @@ def collect_scans(node: AngleTurnProbe, count: int, timeout: float = 4.0) -> lis
     deadline = time.monotonic() + timeout
     last_seq = node.scan_seq
     while len(scans) < count and time.monotonic() < deadline:
-        rclpy.spin_once(node, timeout_sec=0.1)
         if node.latest_scan is not None and node.scan_seq != last_seq:
             scans.append(list(node.latest_scan))
             last_seq = node.scan_seq
+        time.sleep(0.01)
     return scans
 
 
@@ -141,27 +151,43 @@ def estimate_rotation(
     return best_shift * angle_increment, best_shift, best_score, best_overlap
 
 
-def stop_robot(node: AngleTurnProbe, count: int = 12) -> None:
-    for _ in range(count):
+def stop_robot(node: AngleTurnProbe, *, emergency: bool = False, seconds: float = 0.35) -> None:
+    if emergency:
+        node.emergency_stop()
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
         node.publish(0.0)
-        rclpy.spin_once(node, timeout_sec=0.03)
-        time.sleep(0.03)
+        time.sleep(0.02)
+    if emergency:
+        node.emergency_stop()
+
+
+def wait_for_fresh_pose(node: AngleTurnProbe, timeout: float = 3.0, max_age: float = 0.15) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if node.latest_pose is not None and node.latest_pose_mono is not None:
+            if time.monotonic() - node.latest_pose_mono <= max_age:
+                return True
+        time.sleep(0.01)
+    return False
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             'Guarded turn-to-angle test. The robot turns via normal ROS /cmd_vel, '
-            'stops when /odom reaches the requested angle (Waveshare-style), and '
-            'then independently verifies the real rotation using LiDAR scan alignment.'
+            'stops from fresh /odom feedback (Waveshare-style), and then '
+            'independently verifies the real rotation using LiDAR scan alignment.'
         )
     )
     parser.add_argument('--run', action='store_true', help='Required to allow motion.')
     parser.add_argument('--angle', type=float, required=True, help='Target chassis angle in degrees. +left, -right; 15..120 deg magnitude.')
-    parser.add_argument('--angular', type=float, default=0.40, help='Command magnitude in rad/s, 0.20..1.00. In current PWM mode this selects turn direction; bridge uses calibrated turn PWM.')
-    parser.add_argument('--rate', type=float, default=20.0, help='Command/control rate, 10..30 Hz.')
+    parser.add_argument('--angular', type=float, default=0.40, help='Command magnitude in rad/s, 0.20..1.00. In current PWM mode this mainly selects turn direction; bridge uses calibrated turn PWM.')
+    parser.add_argument('--rate', type=float, default=50.0, help='Control-loop rate, 20..100 Hz. ROS callbacks run independently in a background executor.')
     parser.add_argument('--timeout', type=float, default=8.0, help='Safety timeout in seconds, 2..12 s.')
     parser.add_argument('--scans', type=int, default=9, help='Median scans before/after, 5..15.')
+    parser.add_argument('--stop-margin', type=float, default=2.0, help='Stop this many degrees before the requested target to absorb transport/mechanical delay, 0..8 deg.')
+    parser.add_argument('--max-odom-age', type=float, default=0.15, help='Abort if /odom feedback is older than this many seconds, 0.08..0.50.')
     args = parser.parse_args()
 
     if not args.run:
@@ -173,8 +199,8 @@ def main() -> int:
     if not (0.20 <= abs(args.angular) <= 1.00):
         print('ERROR: |--angular| must be between 0.20 and 1.00 rad/s.')
         return 2
-    if not (10.0 <= args.rate <= 30.0):
-        print('ERROR: --rate must be in 10..30 Hz.')
+    if not (20.0 <= args.rate <= 100.0):
+        print('ERROR: --rate must be in 20..100 Hz.')
         return 2
     if not (2.0 <= args.timeout <= 12.0):
         print('ERROR: --timeout must be in 2..12 s.')
@@ -182,32 +208,51 @@ def main() -> int:
     if not (5 <= args.scans <= 15):
         print('ERROR: --scans must be in 5..15.')
         return 2
+    if not (0.0 <= args.stop_margin <= 8.0):
+        print('ERROR: --stop-margin must be in 0..8 degrees.')
+        return 2
+    if not (0.08 <= args.max_odom_age <= 0.50):
+        print('ERROR: --max-odom-age must be in 0.08..0.50 s.')
+        return 2
 
     direction_sign = 1.0 if args.angle > 0.0 else -1.0
     command = direction_sign * abs(args.angular)
-    target_rad = math.radians(abs(args.angle))
+    target_deg = abs(args.angle)
+    target_rad = math.radians(target_deg)
+    stop_trigger_deg = max(1.0, target_deg - args.stop_margin)
+    stop_trigger_rad = math.radians(stop_trigger_deg)
     direction = 'LEFT / CCW' if direction_sign > 0 else 'RIGHT / CW'
 
     print('ODOM-CLOSED-LOOP ANGLE TURN TEST ENABLED.')
-    print('This follows the Waveshare behavior-controller idea: command angular velocity, watch /odom yaw, stop at target.')
+    print('ROS callbacks now run continuously in a background executor so stop decisions use fresh /odom data.')
+    print('At the stop threshold the probe publishes zero AND /base/emergency_stop, then keeps publishing zero.')
     print('LiDAR is used only after the stop as an independent verification of the real chassis angle.')
     print('Keep mapping STOPPED for this calibration. rower_bringup with enable_motion:=true must be running.')
     print('Clear at least 0.5 m around the robot and be ready to stop the bringup terminal with Ctrl+C.')
-    print(f'Target: {args.angle:+.1f} deg ({direction}); cmd angular.z={command:+.3f} rad/s; timeout={args.timeout:.1f}s')
+    print(
+        f'Target: {args.angle:+.1f} deg ({direction}); '
+        f'stop trigger={direction_sign * stop_trigger_deg:+.1f} deg; '
+        f'cmd angular.z={command:+.3f} rad/s; timeout={args.timeout:.1f}s'
+    )
     print('Starting in 3 seconds...')
     time.sleep(3.0)
 
     rclpy.init()
-    node = AngleTurnProbe(args.rate)
+    node = AngleTurnProbe()
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+
     try:
-        stop_robot(node, 8)
+        stop_robot(node, seconds=0.30)
 
         before_raw = collect_scans(node, args.scans)
         if len(before_raw) < 5 or node.scan_increment is None:
             print('ERROR: not enough /scan data. Ensure rower_bringup/lidar is running.')
             return 3
-        if node.latest_pose is None:
-            print('ERROR: no /odom data. Ensure rower_base_bridge is running.')
+        if not wait_for_fresh_pose(node, timeout=2.0, max_age=args.max_odom_age):
+            print('ERROR: no fresh /odom data. Ensure rower_base_bridge is running.')
             return 3
 
         before_scan = median_scan(before_raw)
@@ -218,33 +263,55 @@ def main() -> int:
         deadline = time.monotonic() + args.timeout
         reached = False
         max_progress = 0.0
+        stop_reason = ''
 
         while time.monotonic() < deadline:
             started = time.monotonic()
-            node.publish(command)
-            rclpy.spin_once(node, timeout_sec=min(0.02, period))
 
-            if node.latest_pose is not None:
-                progress = direction_sign * angle_diff(node.latest_pose[2], yaw0)
-                max_progress = max(max_progress, progress)
-                if progress >= target_rad:
-                    reached = True
-                    break
+            pose = node.latest_pose
+            pose_stamp = node.latest_pose_mono
+            if pose is None or pose_stamp is None:
+                stop_robot(node, emergency=True)
+                print('ERROR: /odom disappeared during turn; emergency stop sent.')
+                return 4
+
+            pose_age = time.monotonic() - pose_stamp
+            if pose_age > args.max_odom_age:
+                stop_robot(node, emergency=True)
+                print(
+                    'ERROR: stale /odom during turn; '
+                    f'age={pose_age:.3f}s > limit={args.max_odom_age:.3f}s. Emergency stop sent.'
+                )
+                return 4
+
+            progress = direction_sign * angle_diff(pose[2], yaw0)
+            max_progress = max(max_progress, progress)
+
+            # Check the target BEFORE sending another non-zero command. This is
+            # the key difference from the previous version, which could keep
+            # issuing turn commands while odom callbacks were queued behind
+            # scan/raw callbacks.
+            if progress >= stop_trigger_rad:
+                reached = True
+                stop_reason = f'fresh odom reached {math.degrees(progress):.2f}deg'
+                node.publish(0.0)
+                node.emergency_stop()
+                break
+
+            node.publish(command)
 
             delay = period - (time.monotonic() - started)
             if delay > 0:
                 time.sleep(delay)
 
-        stop_robot(node, 14)
-        time.sleep(0.20)
-        for _ in range(8):
-            rclpy.spin_once(node, timeout_sec=0.05)
+        stop_robot(node, emergency=True, seconds=0.45)
+        time.sleep(0.25)
 
         if not reached:
             print(f'ERROR: target not reached before timeout; max_odom_progress={math.degrees(max_progress):.2f}deg')
             return 4
-        if node.latest_pose is None:
-            print('ERROR: /odom disappeared after turn')
+        if not wait_for_fresh_pose(node, timeout=1.0, max_age=args.max_odom_age):
+            print('ERROR: /odom did not remain fresh after stop.')
             return 3
 
         x1, y1, yaw1 = node.latest_pose
@@ -258,8 +325,8 @@ def main() -> int:
             return 3
         after_scan = median_scan(after_raw)
 
-        min_angle = max(5.0, abs(args.angle) - 40.0)
-        max_angle = min(170.0, abs(args.angle) + 40.0)
+        min_angle = max(5.0, target_deg - 40.0)
+        max_angle = min(170.0, target_deg + 40.0)
         shift_angle, shift, score, overlap = estimate_rotation(
             before_scan,
             after_scan,
@@ -273,11 +340,13 @@ def main() -> int:
         print(
             'ANGLE_TURN_RESULT: '
             f'target={args.angle:+.2f}deg '
+            f'stop_trigger={direction_sign * stop_trigger_deg:+.2f}deg '
             f'odom={odom_angle:+.2f}deg '
             f'lidar={lidar_angle:+.2f}deg '
             f'odom_error={odom_angle - args.angle:+.2f}deg '
             f'lidar_error={lidar_angle - args.angle:+.2f}deg '
-            f'center_drift={drift:.4f}m'
+            f'center_drift={drift:.4f}m '
+            f'stop_reason="{stop_reason}"'
         )
         print(
             'LIDAR_VERIFY: '
@@ -304,9 +373,11 @@ def main() -> int:
         return 0
     finally:
         try:
-            stop_robot(node, 8)
+            stop_robot(node, emergency=True, seconds=0.25)
         except Exception:
             pass
+        executor.shutdown(timeout_sec=1.0)
+        spin_thread.join(timeout=1.0)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
