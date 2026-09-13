@@ -16,6 +16,10 @@ def generate_launch_description():
     robot_description = xacro.process_file(xacro_file).toxml()
 
     enable_motion = LaunchConfiguration('enable_motion')
+    drive_mode = LaunchConfiguration('drive_mode')
+    pwm_linear_reference = LaunchConfiguration('pwm_linear_reference')
+    pwm_turn_left = LaunchConfiguration('pwm_turn_left')
+    pwm_turn_right = LaunchConfiguration('pwm_turn_right')
     left_command_scale = LaunchConfiguration('left_command_scale')
     right_command_scale = LaunchConfiguration('right_command_scale')
     odom_meters_per_count = LaunchConfiguration('odom_meters_per_count')
@@ -30,17 +34,37 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_motion',
             default_value='false',
-            description='Allow /cmd_vel to command the drive motors. Default is false.',
+            description='Allow /cmd_vel to command the physical drive motors.',
+        ),
+        DeclareLaunchArgument(
+            'drive_mode',
+            default_value='pwm',
+            description='Drive backend: pwm (validated T=11 raw PWM) or velocity_pid (legacy T=1).',
+        ),
+        DeclareLaunchArgument(
+            'pwm_linear_reference',
+            default_value='40',
+            description='Raw PWM producing the validated straight mapping speed near 0.10-0.12 m/s.',
+        ),
+        DeclareLaunchArgument(
+            'pwm_turn_left',
+            default_value='60',
+            description='Raw PWM magnitude for left/CCW in-place breakaway and turning.',
+        ),
+        DeclareLaunchArgument(
+            'pwm_turn_right',
+            default_value='60',
+            description='Raw PWM magnitude for right/CW in-place breakaway and turning.',
         ),
         DeclareLaunchArgument(
             'left_command_scale',
             default_value='1.0',
-            description='Left drive gain. Long floor test showed factory-balanced 1.0 is stable at 0.10 m/s.',
+            description='Legacy T=1 left drive gain; ignored in pwm mode.',
         ),
         DeclareLaunchArgument(
             'right_command_scale',
             default_value='1.0',
-            description='Right drive gain. Long floor test showed factory-balanced 1.0 is stable at 0.10 m/s.',
+            description='Legacy T=1 right drive gain; ignored in pwm mode.',
         ),
         DeclareLaunchArgument(
             'odom_meters_per_count',
@@ -54,28 +78,28 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'odom_yaw_scale_left',
-            default_value='0.50',
-            description='LiDAR-calibrated scale for left/CCW wheel-counter yaw.',
+            default_value='0.49',
+            description='LiDAR-calibrated left/CCW wheel-counter yaw scale for raw PWM drive.',
         ),
         DeclareLaunchArgument(
             'odom_yaw_scale_right',
-            default_value='0.50',
-            description='LiDAR-calibrated scale for right/CW wheel-counter yaw.',
+            default_value='0.44',
+            description='LiDAR-calibrated right/CW wheel-counter yaw scale for raw PWM drive.',
         ),
         DeclareLaunchArgument(
             'command_rate_hz',
             default_value='20.0',
-            description='Wheel command update rate. 20 Hz gives smoother slew-limited motion.',
+            description='Motor command refresh rate.',
         ),
         DeclareLaunchArgument(
             'wheel_accel_limit',
             default_value='0.12',
-            description='Maximum normal wheel acceleration in m/s^2.',
+            description='Legacy T=1 wheel acceleration limit; ignored in pwm mode.',
         ),
         DeclareLaunchArgument(
             'wheel_decel_limit',
             default_value='0.18',
-            description='Maximum normal wheel deceleration in m/s^2. Watchdog stops remain immediate.',
+            description='Legacy T=1 wheel deceleration limit; ignored in pwm mode.',
         ),
         Node(
             package='robot_state_publisher',
@@ -104,6 +128,10 @@ def generate_launch_description():
                 'base_frame': 'base_link',
                 'odom_frame': 'odom',
                 'enable_motion': ParameterValue(enable_motion, value_type=bool),
+                'drive_mode': ParameterValue(drive_mode, value_type=str),
+                'pwm_linear_reference': ParameterValue(pwm_linear_reference, value_type=int),
+                'pwm_turn_left': ParameterValue(pwm_turn_left, value_type=int),
+                'pwm_turn_right': ParameterValue(pwm_turn_right, value_type=int),
                 'left_command_scale': ParameterValue(left_command_scale, value_type=float),
                 'right_command_scale': ParameterValue(right_command_scale, value_type=float),
                 'odom_meters_per_count': ParameterValue(odom_meters_per_count, value_type=float),
