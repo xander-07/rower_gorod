@@ -22,36 +22,23 @@ def generate_launch_description():
     web_port = LaunchConfiguration('web_port')
     rosbridge_port = LaunchConfiguration('rosbridge_port')
 
-    # During mapping, wheel odometry remains available on /wheel_odom for motor
-    # control and diagnostics, but it no longer owns odom->base_link. RF2O uses
-    # consecutive LiDAR scans to estimate the actual 2D robot motion, including
-    # in-place rotation, and publishes the mapping /odom + odom->base_link TF.
+    # Mapping pose source: the already calibrated cumulative wheel odometry.
+    # RF2O remains installed for diagnostics, but is not authoritative here:
+    # the round-trip turn test showed large false translation and several
+    # degrees of accumulated yaw drift. The wheel model has already been
+    # independently validated against LiDAR on 45/90 degree turns and straight
+    # travel. With the STL-19P scan direction now corrected to ROS CCW, this is
+    # the cleanest baseline for mapping.
     robot_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bringup_share, 'launch', 'robot.launch.py')
         ),
         launch_arguments={
             'enable_motion': enable_motion,
-            'publish_tf': 'false',
-            'odom_topic': '/wheel_odom',
-            'odom_frame': 'wheel_odom',
-        }.items(),
-    )
-
-    rf2o = Node(
-        package='rf2o_laser_odometry',
-        executable='rf2o_laser_odometry_node',
-        name='rf2o_laser_odometry',
-        output='screen',
-        parameters=[{
-            'laser_scan_topic': '/scan',
+            'publish_tf': 'true',
             'odom_topic': '/odom',
-            'publish_tf': True,
-            'base_frame_id': 'base_link',
-            'odom_frame_id': 'odom',
-            'init_pose_from_topic': '',
-            'freq': 20.0,
-        }],
+            'odom_frame': 'odom',
+        }.items(),
     )
 
     slam_launch = IncludeLaunchDescription(
@@ -63,9 +50,6 @@ def generate_launch_description():
         }.items(),
     )
 
-    # Keep turn stopping on the already LiDAR-calibrated wheel odometry. RF2O is
-    # responsible for the mapping pose; the wheel counters are still the safest
-    # short-horizon feedback for the motor stop threshold.
     turn_controller_script = '/workspace/rower_gorod/src/rower_navigation/scripts/turn_controller.py'
     turn_controller = ExecuteProcess(
         cmd=[
@@ -75,7 +59,7 @@ def generate_launch_description():
             '-p', 'request_topic:=/mapping/turn_angle_deg',
             '-p', 'state_topic:=/mapping/turn_active',
             '-p', 'cmd_vel_topic:=/cmd_vel',
-            '-p', 'odom_topic:=/wheel_odom',
+            '-p', 'odom_topic:=/odom',
             '-p', 'emergency_topic:=/base/emergency_stop',
             '-p', 'angular_command:=0.40',
             '-p', 'left_stop_margin_deg:=3.0',
@@ -118,7 +102,6 @@ def generate_launch_description():
         DeclareLaunchArgument('web_port', default_value='8080', description='HTTP port for the local browser dashboard.'),
         DeclareLaunchArgument('rosbridge_port', default_value='9090', description='WebSocket port used by the local dashboard.'),
         robot_launch,
-        rf2o,
         turn_controller,
         rosbridge,
         web_server,
