@@ -22,6 +22,7 @@ RUN --mount=type=secret,id=local_ca,target=/usr/local/share/ca-certificates/rowe
        ros-jazzy-navigation2 \
        ros-jazzy-nav2-bringup \
        ros-jazzy-slam-toolbox \
+       ros-jazzy-rf2o-laser-odometry \
        ros-jazzy-robot-state-publisher \
        ros-jazzy-xacro \
        ros-jazzy-tf2-tools \
