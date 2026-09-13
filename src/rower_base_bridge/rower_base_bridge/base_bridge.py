@@ -51,15 +51,15 @@ class RowerBaseBridge(Node):
 
         # Empirical raw-PWM drive path. On the real robot:
         #   T=11 L=40 R=40 -> straight, counters 14/14, ~0.116 m/s feedback.
-        #   T=11 L=-60 R=60 -> ~+15 deg in 0.6 s.
-        #   T=11 L=60 R=-60 -> real right turns; exact rate varies with slip.
+        #   T=11 L=-80 R=80 -> calibrated left/CCW in-place turn.
+        #   T=11 L=80 R=-80 -> calibrated right/CW in-place turn.
         self.declare_parameter('drive_mode', 'pwm')
         self.declare_parameter('pwm_linear_reference_speed', 0.10)
         self.declare_parameter('pwm_linear_reference', 40)
         self.declare_parameter('pwm_linear_min', 40)
         self.declare_parameter('pwm_linear_max', 70)
-        self.declare_parameter('pwm_turn_left', 60)
-        self.declare_parameter('pwm_turn_right', 60)
+        self.declare_parameter('pwm_turn_left', 80)
+        self.declare_parameter('pwm_turn_right', 80)
         self.declare_parameter('pwm_linear_deadband', 0.02)
         self.declare_parameter('pwm_angular_deadband', 0.05)
         self.declare_parameter('pwm_turn_linear_threshold', 0.02)
@@ -79,8 +79,8 @@ class RowerBaseBridge(Node):
         self.declare_parameter('angular_command_offset_right', 0.3235)
         self.declare_parameter('angular_command_max_raw', 2.50)
 
-        # Raw-PWM LiDAR turn tests support about 0.49 left and 0.44 right.
-        self.declare_parameter('odom_yaw_scale_left', 0.49)
+        # LiDAR-validated wheel-counter yaw scales for the raw-PWM drive path.
+        self.declare_parameter('odom_yaw_scale_left', 0.447)
         self.declare_parameter('odom_yaw_scale_right', 0.44)
 
         self.serial_port = str(self.get_parameter('serial_port').value)
